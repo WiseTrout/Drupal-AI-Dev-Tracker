@@ -44,6 +44,7 @@
         "drupal/project_browser": "@beta",
         "drupal/queue_ui": "^3.2",
         "drupal/recipe_installer_kit": "^1-alpha3@alpha",
+        "drupal/restui": "^1.22",
         "drupal/webform": "@beta",
         "drush/drush": "^13"
     },
