@@ -106,9 +106,12 @@ module:
   redirect: 0
   redirect_404: 0
   responsive_image: 0
+  rest: 0
+  restui: 0
   sam: 0
   scheduler: 0
   scheduler_content_moderation_integration: 0
+  serialization: 0
   site_tweaks: 0
   smart_date: 0
   svg_image: 0
