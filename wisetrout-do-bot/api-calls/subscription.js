@@ -1,4 +1,21 @@
-export async function subscribe(chatId, modules){}
+import { oAuthToken } from "../oauth.js";
+
+export async function subscribe(chatId, modules){
+
+    // const body = JSON.stringify({
+    //     chatId,
+    //     modules
+    // })
+
+    // fetch(process.env.BASE_URL + '/api/telegram/subscribe', {
+    //     method: 'POST',
+    //     headers: {
+    //                 'Content-Type': 'application/json',
+    //                 'Authorization': `Bearer ${oAuthToken}`
+    //            },
+    //     body: body
+    // })
+}
 
 export async function unsubscribe(chatId){}
 
