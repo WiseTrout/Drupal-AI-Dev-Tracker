@@ -19,44 +19,54 @@ use Drupal\node\Entity\Node;
  */
 class UserInfo extends ResourceBase {
 
-    private function readSubscriberInfo($cid, $database){
+    private function readUserStatus($cid, $database){
       $queryResult = $database
-      ->query("SELECT status, type FROM {telegram_subscribers} WHERE chat_id = :cid", [':cid' => $cid])
+      ->query("SELECT status FROM {telegram_subscribers} WHERE chat_id = :cid", [':cid' => $cid])
       ->fetchAssoc();
-      return $queryResult;
+      $status = $queryResult ? $queryResult['status'] : null;
+      return $status;
     }
 
     private function readModulesList($cid, $database){
 
-      $moduleIds = $database
+      $dbRows = $database
       ->query("SELECT module_id FROM {telegram_subscriptions} WHERE chat_id = :cid", [':cid' => $cid])
-      ->fetchCol();
+      ->fetchAll();
+
+      $moduleIds = [];
+
+      foreach($dbRows as $dbRow){
+        $moduleIds[] = $dbRow->module_id;
+      }
 
       $nodes = \Drupal::entityTypeManager()->getStorage('node')->loadMultiple($moduleIds);
 
-      $modules = array_map(function ($node){
-        return $node->field_module_machine_name[0]->value;
-      }, $nodes);
+      $modules = [];
+
+      foreach($nodes as $node){
+        $modules[] = $node->field_module_machine_name[0]->value;
+      }
 
       return $modules;
+
+      // return $moduleIds;
     }
 
     public function get($cid){
 
     $database = \Drupal::database();
 
-    $subscriberInfo = $this->readSubscriberInfo($cid, $database);
+    $userStatus = $this->readUserStatus($cid, $database);
 
-    if(!$subscriberInfo) {
-      return new ResourceResponse(null, 204);
-    }else{
-      $modulesList = $this->readModulesList($cid, $database);
-      return new ResourceResponse([
-        'subscribed' => !!$subscriberInfo['status'],
-        'modules' => $modulesList,
-        'type' => $subscriberInfo['type'],
-      ]);
+    $responseData = [
+      'subscribed' => !!$userStatus,
+      'modules' => [],
+    ];
+
+    if ($userStatus !== null) {
+      $responseData['modules'] = $this->readModulesList($cid, $database);
     }
 
+    return new ResourceResponse($responseData);
   }
 }
