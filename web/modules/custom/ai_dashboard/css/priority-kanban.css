@@ -324,8 +324,41 @@ body[class*="path-ai-dashboard/priority-kanban"] {
 
 /* Issue Status Colors */
 .ai-priority-kanban .issue-card.active {
-  background: #dbeafe;
-  border-color: #3b82f6;
+  background: #e0f2fe;
+  border-color: #0072B2;
+}
+
+.ai-priority-kanban .issue-card.needs-review {
+  background: #fef3c7;
+  border-color: #E69F00;
+}
+
+.ai-priority-kanban .issue-card.needs-work {
+  background: #d1fae5;
+  border-color: #009E73;
+}
+
+.ai-priority-kanban .issue-card.fixed,
+.ai-priority-kanban .issue-card.rtbc {
+  background: #d1fae5;
+  border-color: #009E73;
+}
+
+/* Priority Colors */
+.ai-priority-kanban .issue-card.priority-critical {
+  border-left-color: #D55E00 !important;
+}
+
+.ai-priority-kanban .issue-card.priority-major {
+  border-left-color: #E69F00 !important;
+}
+
+.ai-priority-kanban .issue-card.priority-normal {
+  border-left-color: #0072B2 !important;
+}
+
+.ai-priority-kanban .issue-card.priority-minor {
+  border-left-color: #374151 !important;
 }
 
 .ai-priority-kanban .issue-card.needs-review {
@@ -503,24 +536,24 @@ body[class*="path-ai-dashboard/priority-kanban"] {
 }
 
 .ai-priority-kanban .issue-card.active .issue-status {
-  background: #3b82f6;
-  color: white;
+  background: #e0f2fe;
+  color: #0072B2;
 }
 
 .ai-priority-kanban .issue-card.needs-review .issue-status {
-  background: #f59e0b;
-  color: white;
+  background: #fef3c7;
+  color: #D55E00;
 }
 
 .ai-priority-kanban .issue-card.needs-work .issue-status {
-  background: #ea580c;
-  color: white;
+  background: #d1fae5;
+  color: #009E73;
 }
 
 .ai-priority-kanban .issue-card.fixed .issue-status,
 .ai-priority-kanban .issue-card.rtbc .issue-status {
-  background: #22c55e;
-  color: white;
+  background: #d1fae5;
+  color: #009E73;
 }
 
 .ai-priority-kanban .issue-priority {
@@ -533,22 +566,22 @@ body[class*="path-ai-dashboard/priority-kanban"] {
 
 .ai-priority-kanban .issue-priority.priority-critical {
     background: #fecaca;
-    color: #dc2626;
+    color: #D55E00;
 }
 
 .ai-priority-kanban .issue-priority.priority-major {
     background: #fed7aa;
-    color: #ea580c;
+    color: #E69F00;
 }
 
 .ai-priority-kanban .issue-priority.priority-normal {
     background: #dbeafe;
-    color: #3b82f6;
+    color: #0072B2;
 }
 
 .ai-priority-kanban .issue-priority.priority-minor {
     background: #f3f4f6;
-    color: #6b7280;
+    color: #374151;
 }
 
 .ai-priority-kanban .issue-blocked {

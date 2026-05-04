@@ -1,0 +1,27 @@
+/* 
+  Okabe-Ito Palette for accessibility:
+  - Black: #000000
+  - Orange: #E69F00
+  - Sky Blue: #56B4L
+  - Bluish Green: #009E73
+  - Yellow: #F0E442
+  - Blue: #0072B2
+  - Vermilion: #D55E00
+  - Reddish Purple: #CC79A7
+*/
+
+/* 
+  Strategy for Kanban:
+  
+  Statuses (Backgrounds):
+  - Active: Sky Blue/Blue variant (#56B4L / #0072B4)
+  - Needs Review: Orange/Vermilion variant (#E69F00)
+  - Needs Work: Bluish Green/Green variant (#009E73)
+  - Fixed/RTBC: Bluish Green/Green variant (#009E73)
+
+  Priorities (Border-left):
+  - Critical: Vermilion (#D55E00)
+  - Major: Orange (#E69F00)
+  - Normal: Blue (#0072B2)
+  - Minor: Black/Dark Gray (#000000)
+*/
