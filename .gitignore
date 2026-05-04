@@ -206,3 +206,9 @@ test-kanban-login.js
 
 .devpanel/salt.txt
 config/sync/mailchimp.settings.yml
+
+private
+.ddev/docker-compose.phpmyadmin_norouter.yaml
+.ddev/docker-compose.phpmyadmin.yaml
+.ddev/addon-metadata/phpmyadmin/manifest.yaml
+.ddev/commands/host/phpmyadmin
