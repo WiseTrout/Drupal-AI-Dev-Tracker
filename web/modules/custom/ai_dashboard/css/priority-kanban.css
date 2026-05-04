@@ -192,7 +192,7 @@ body[class*="path-ai-dashboard/priority-kanban"] {
 .ai-priority-kanban .column-count {
   font-size: 1rem;
   font-weight: 500;
-  color: #9ca3af;
+  color: #4b5563;
 }
 
 .ai-priority-kanban .column-description {
@@ -566,22 +566,19 @@ body[class*="path-ai-dashboard/priority-kanban"] {
 
 .ai-priority-kanban .issue-priority.priority-critical {
     background: #fecaca;
-    color: #D55E00;
+    color: #991b1b;
 }
-
 .ai-priority-kanban .issue-priority.priority-major {
     background: #fed7aa;
-    color: #E69F00;
+    color: #9a3412;
 }
-
 .ai-priority-kanban .issue-priority.priority-normal {
     background: #dbeafe;
-    color: #0072B2;
+    color: #1e40af;
 }
-
 .ai-priority-kanban .issue-priority.priority-minor {
     background: #f3f4f6;
-    color: #374151;
+    color: #1f2937;
 }
 
 .ai-priority-kanban .issue-blocked {
@@ -599,7 +596,7 @@ body[class*="path-ai-dashboard/priority-kanban"] {
   display: flex;
   align-items: center;
   gap: 0.25rem;
-  color: #6b7280;
+  color: #374151;
 }
 
 .ai-priority-kanban .issue-deadline.overdue {
@@ -658,7 +655,6 @@ body[class*="path-ai-dashboard/priority-kanban"] {
   padding: 0.125rem 0.375rem;
   border-radius: 0.25rem;
   line-height: 1.2;
-  opacity: 0.9;
 }
 
 .ai-priority-kanban .issue-due-date {
