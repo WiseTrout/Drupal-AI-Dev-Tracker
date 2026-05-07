@@ -19,54 +19,44 @@ use Drupal\node\Entity\Node;
  */
 class UserInfo extends ResourceBase {
 
-    private function readUserStatus($cid, $database){
+    private function readSubscriberInfo($cid, $database){
       $queryResult = $database
-      ->query("SELECT status FROM {telegram_subscribers} WHERE chat_id = :cid", [':cid' => $cid])
+      ->query("SELECT status, type FROM {telegram_subscribers} WHERE chat_id = :cid", [':cid' => $cid])
       ->fetchAssoc();
-      $status = $queryResult ? $queryResult['status'] : null;
-      return $status;
+      return $queryResult;
     }
 
     private function readModulesList($cid, $database){
 
-      $dbRows = $database
+      $moduleIds = $database
       ->query("SELECT module_id FROM {telegram_subscriptions} WHERE chat_id = :cid", [':cid' => $cid])
-      ->fetchAll();
-
-      $moduleIds = [];
-
-      foreach($dbRows as $dbRow){
-        $moduleIds[] = $dbRow->module_id;
-      }
+      ->fetchCol();
 
       $nodes = \Drupal::entityTypeManager()->getStorage('node')->loadMultiple($moduleIds);
 
-      $modules = [];
+      $modules = array_map(function ($node){
+        return $node->field_module_machine_name[0]->value;
+      }, $nodes);
 
-      foreach($nodes as $node){
-        $modules[] = $node->field_module_machine_name[0]->value;
-      }
-
-      return $modules;
-
-      // return $moduleIds;
+      return array_values($modules);
     }
 
     public function get($cid){
 
     $database = \Drupal::database();
 
-    $userStatus = $this->readUserStatus($cid, $database);
+    $subscriberInfo = $this->readSubscriberInfo($cid, $database);
 
-    $responseData = [
-      'subscribed' => !!$userStatus,
-      'modules' => [],
-    ];
-
-    if ($userStatus !== null) {
-      $responseData['modules'] = $this->readModulesList($cid, $database);
+    if(!$subscriberInfo) {
+      return new ResourceResponse(null, 204);
+    }else{
+      $modulesList = $this->readModulesList($cid, $database);
+      return new ResourceResponse([
+        'subscribed' => !!$subscriberInfo['status'],
+        'modules' => $modulesList,
+        'type' => $subscriberInfo['type'],
+      ]);
     }
 
-    return new ResourceResponse($responseData);
   }
 }
