@@ -440,8 +440,8 @@ class IssueImportService {
     }
   }
 
-  /**
-   * Import issues from drupal.org API.
+    /**
+   * Import issues from drupal.org API.  
    *
    * @param string $project_id
    *   The project ID (nid).
@@ -458,8 +458,8 @@ class IssueImportService {
    *
    * @return array
    *   Import results.
-   */
-  public function importFromDrupalOrg(string $project_id, array $filter_tags, array $status_filter, int $max_issues, ?string $date_filter, ModuleImport $config): array {
+   */   
+   public function importFromDrupalOrg(string $project_id, array $filter_tags, array $status_filter, int $max_issues, ?string $date_filter, ModuleImport $config): array {
     // Clear import session cache at start of import.
     $this->clearImportSessionCache();
 
@@ -808,10 +808,273 @@ class IssueImportService {
   }
 
   /**
-   * Import from GitLab (placeholder for future implementation).
+   * Import from GitLab.
+   *
+   * @param string $project_id
+   *   The GitLab project ID or path.
+   * @param array $filter_tags
+   *   Tags to filter by.
+   * @param array $status_filter
+   *   Status IDs to filter by.
+   * @param int $max_issues
+   *   Maximum issues to import.
+   * @param string|null $date_to_filter
+   *   Date filter for created date.
+   * @param ModuleImport $config
+   *   The import configuration node.
+   *
+   * @return array
+   *   Import results.
    */
-  protected function importFromGitLab(string $project_id, array $filter_tags, array $status_filter, int $max_issues, ?string $date_filter, ModuleImport $config): array {
-    throw new \Exception('GitLab import not yet implemented');
+  protected function importFromGitLab(string $project_id, array $filter_tags, array $status_filter, int $max_issues, ?string $date_to_filter, ModuleImport $config): array {
+    $this->clearImportSessionCache();
+    $logger = $this->loggerFactory->get('ai_dashboard');
+    $token = getenv('GITLAB_API_TOKEN');
+    if (!$token) {
+      throw new \Exception('GITLAB_API_TOKEN environment variable not set');
+    }
+
+    $encoded_project_id = urlencode($project_id);
+    $url = "https://gitlab.com/api/v4/projects/{$encoded_project_id}/issues";
+    
+    $state = 'all';
+    if (!empty($status_filter)) {
+      $has_open = false;
+      $has_closed = false;
+      foreach ($status_filter as $s) {
+        if (in_array($s, ['1', '13', '8', '14', '15'])) $has_open = true;
+        if (in_array($s, ['2', '4', '16'])) $has_closed = true;
+      }
+      if ($has_open && $has_closed) {
+        $state = 'all';
+      } elseif ($has_closed) {
+        $state = 'closed';
+      } else {
+        $state = 'open';
+      }
+    }
+
+    $params = [
+      'state' => $state,
+      'per_page' => self::BATCH_SIZE,
+    ];
+
+    if (!empty($filter_tags)) {
+      $params['labels'] = implode(',', $filter_tags);
+    }
+
+    if ($date_to_filter) {
+      $timestamp = strtotime($date_to_filter);
+      if ($timestamp) {
+        $params['updated_after'] = date('c', $timestamp);
+      }
+    }
+
+    try {
+      $results = [
+        'success' => TRUE,
+        'imported' => 0,
+        'updated' => 0,
+        'skipped' => 0,
+        'errors' => 0,
+        'message' => '',
+      ];
+
+      $page = 0;
+      $total_processed = 0;
+
+      do {
+        $current_params = $params;
+        $current_params['page'] = $page;
+        $current_params['per_page'] = min(self::BATCH_SIZE, $max_issues - $total_processed);
+
+        $response = $this->httpClient->request('GET', $url, [
+          'query' => $current_params,
+          'timeout' => 60,
+          'headers' => [
+            'User-Agent' => self::USER_AGENT,
+            'Private-Token' => $token,
+          ],
+        ]);
+
+        $issues = json_decode($response->getBody()->getContents(), TRUE);
+
+        if (!is_array($issues) || empty($issues)) {
+          break;
+        }
+
+        $page_issues = count($oper_issues = $issues);
+        $total_processed += $page_issues;
+
+        foreach ($issues as $issue_data) {
+          if ($total_processed > $max_issues) {
+            break 2;
+          }
+
+          try {
+            // Transform GitLab issue to Drupal.org structure for mapDrupalOrgIssue
+            $transformed_issue = [
+              'nid' => $issue_data['iid'],
+              'title' => $issue_data['title'],
+              'url' => $issue_data['web_url'],
+              'field_issue_status' => ($issue_data['state'] === 'closed') ? '2' : '1',
+              'field_issue_priority' => '300',
+              'created' => strtotime($issue_data['created_at']),
+              'changed' => strtotime($issue_data['updated_at']),
+              'taxonomy_vocabulary_9' => array_map(function($label) {
+                return ['name' => $label];
+              }, $issue_data['labels'] ?? []),
+              'body' => $issue_data['description'] ?? '',
+            ];
+
+            $result = $this->processIssue($transformed_issue, $config);
+            if ($result === 'created') {
+              $results['imported']++;
+            } elseif ($result === 'updated') {
+              $results['updated']++;
+            } elseif ($result === 'skipped') {
+              $results['skipped']++;
+            }
+          }
+          catch (\Exception $e) {
+            $logger->warning('Failed to process GitLab issue @id: @message', [
+              '@id' => $issue_data['iid'] ?? 'unknown',
+              '@message' => $e->getMessage(),
+            ]);
+            $results['errors']++;
+            $total_processed++;
+          }
+        }
+
+        $page++;
+      } while ($page_issues === self::BATCH_SIZE && $total_processed < $max_issues);
+
+      $results['message'] = sprintf(
+        'Import completed: %d imported, %d updated, %d skipped, %d errors',
+        $results['imported'],
+        $results['updated'],
+        $results['skipped'],
+        $results['errors']
+      );
+
+      return $results;
+    }
+    catch (RequestException $e) {
+      throw new \Exception('Failed to fetch data from GitLab: ' . $e->getMessage());
+    }
+
+    
+    if (!empty($status_filter)) {
+      $params['field_issue_status'] = $status_filter[0];
+    }
+
+    // Add component filter if specified.
+    if ($component = $config->getFilterComponent()) {
+      $params['field_issue_component'] = $component;
+    }
+
+    // Add date filter if specified.
+    if ($date_filter) {
+      $timestamp = strtotime($date_filter);
+      if ($timestamp) {
+        $params['changed'] = '>=' . $timestamp;
+      }
+    }
+
+    try {
+      $results = [
+        'success' => TRUE,
+        'imported' => 0,
+        'updated' => 0,
+        'skipped' => 0,
+        'errors' => 0,
+        'message' => '',
+      ];
+
+      $page = 0;
+      // drupal.org API limit.
+      $per_page = 50;
+      $total_processed = 0;
+
+      do {
+        // Set pagination parameters.
+        $current_params = $params;
+        $current_params['limit'] = min($per_page, $max_issues - $total_processed);
+        $current_params['page'] = $page;
+
+        $response = $this->httpClient->request('GET', $url, [
+          'query' => $current_params,
+        // Increased timeout for large imports.
+          'timeout' => 60,
+          'headers' => [
+            'User-Agent' => self::USER_AGENT,
+          ],
+        ]);
+
+        $data = json_decode($response->getBody()->getContents(), TRUE);
+
+        if (!isset($data['list']) || !is_array($data['list'])) {
+          throw new \Exception('Invalid response format from drupal.org API');
+        }
+
+        $page_issues = count($data['list']);
+        if ($page_issues === 0) {
+          // No more issues.
+          break;
+        }
+
+        foreach ($data['list'] as $issue_data) {
+          if ($total_processed >= $max_issues) {
+            // Break out of both loops.
+            break 2;
+          }
+
+          try {
+            // Filter by tags if specified.
+            if (!empty($filter_tags) && !$this->issueMatchesTagFilter($issue_data, $filter_tags)) {
+              $results['skipped']++;
+              $total_processed++;
+              continue;
+            }
+
+            $result = $this->processIssue($issue_data, $config);
+            if ($result === 'created') {
+              $results['imported']++;
+            } elseif ($result === 'updated') {
+              $results['updated']++;
+            } elseif ($result === 'skipped') {
+              $results['skipped']++;
+            }
+            $total_processed++;
+          }
+          catch (\Exception $e) {
+            $logger->warning('Failed to process issue @id: @message', [
+              '@id' => $issue_data['nid'] ?? 'unknown',
+              '@message' => $e->getMessage(),
+            ]);
+            $results['errors']++;
+            $total_processed++;
+          }
+        }
+
+        $page++;
+
+        // Continue if we got a full page and haven't reached the limit.
+      } while ($page_issues === $per_page && $total_processed < $max_issues);
+
+      $results['message'] = sprintf(
+        'Import completed: %d imported, %d updated, %d skipped, %d errors',
+        $results['imported'],
+        $results['updated'],
+        $results['skipped'],
+        $results['errors']
+      );
+
+      return $results;
+    }
+    catch (RequestException $e) {
+      throw new \Exception('Failed to fetch data from drupal.org: ' . $e->getMessage());
+    }
   }
 
   /**
