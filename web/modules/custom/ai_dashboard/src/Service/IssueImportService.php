@@ -912,22 +912,7 @@ class IssueImportService {
           }
 
           try {
-            // Transform GitLab issue to Drupal.org structure for mapDrupalOrgIssue
-            $transformed_issue = [
-              'nid' => $issue_data['iid'],
-              'title' => $issue_data['title'],
-              'url' => $issue_data['web_url'],
-              'field_issue_status' => ($issue_data['state'] === 'closed') ? '2' : '1',
-              'field_issue_priority' => '300',
-              'created' => strtotime($issue_data['created_at']),
-              'changed' => strtotime($issue_data['updated_at']),
-              'taxonomy_vocabulary_9' => array_map(function($label) {
-                return ['name' => $label];
-              }, $issue_data['labels'] ?? []),
-              'body' => $issue_data['description'] ?? '',
-            ];
-
-            $result = $this->processIssue($transformed_issue, $config);
+            $result = $this->processIssue($issue_data, $config);
             if ($result === 'created') {
               $results['imported']++;
             } elseif ($result === 'updated') {
@@ -1132,7 +1117,8 @@ class IssueImportService {
     switch ($source_type) {
       case 'drupal_org':
         return $this->mapDrupalOrgIssue($issue_data, $config);
-
+      case 'gitlab': 
+        return $this->mapGitLabIssue($issue_data, $config);
       default:
         throw new \InvalidArgumentException("Unsupported source type: {$source_type}");
     }
@@ -1279,6 +1265,79 @@ class IssueImportService {
       'additional_collaborators' => $parsed_metadata['additional_collaborators'] ?? '',
     ];
   }
+
+  protected function mapGitLabIssue(array $issue_data, ModuleImport $config): array {
+    // Extract tags from GitLab issue labels.
+    $tags = $issue_data['labels'] ?? [];
+    if (is_string($tags)) {
+      $tags = explode(',', $tags);
+    }
+    $tags = array_map('trim', $tags);
+
+    // Process tags through mapping service.
+    $processed_tags = $this->tagMappingService->processTags($tags);
+
+    // Extract and parse AI Tracker metadata from issue description.
+    $issue_description = $issue_data['description'] ?? '';
+    $parsed_metadata = $this->metadataParserService->parseMetadata($issue_description);
+
+    // Extract GitLab assignee information.
+    $gitlab_assignee = '';
+    $assignee_id = 0;
+    if (!empty($issue_data['assignees'])) {
+      foreach ($issue_data['assignees'] as $assignee) {
+        // GitLab assignees might have username or we might need to resolve.
+        // For now, we use the username if available.
+        $gitlab_assignee = $assignee['username'] ?? $assignee['name'] ?? '';
+        // In a real implementation, we'd try to match this to a local contributor.
+        // For this MVP, we leave assignee_id 0 or attempt to find it.
+        break; 
+      }
+    }
+
+    // Find or create the module node.
+    $module_node_id = $this->findOrCreateModule($config->getProjectMachineName());
+
+    // Determine non-developer flag: presence of a non-developer tag.
+    $non_dev_flag = FALSE;
+    foreach ($tags as $t) {
+      if (strcasecmp(trim($t), 'non-developer') === 0 || strcasecmp(trim($t), 'non_developer') === 0) {
+        $non_dev_flag = TRUE;
+        break;
+      }
+    }
+
+    return [
+      'external_id' => (string) $issue_data['iid'],
+      'source_type' => 'gitlab',
+      'title' => $issue_data['title'] ?? 'Untitled Issue',
+      'issue_number' => (string) $issue_data['iid'],
+      'issue_url' => $issue_data['web_url'] ?? '',
+      'status' => $this->mapGitLabStatus($issue_data['state'] ?? 'open'),
+      'priority' => $processed_tags['priority'] ?? 'normal',
+      'category' => $processed_tags['category'] ?? 'general',
+      'track' => $processed_tags['track'] ?? '',
+      'workstream' => $processed_tags['workstream'] ?? '',
+      'issue_summary' => $issue_description,
+      'tags' => $tags,
+      'module' => $module_node_id,
+      'do_assignee' => $gitlab_assignee,
+      'assignee_id' => $assignee_id,
+      'created' => isset($issue_data['created_at']) ? strtotime($issue_data['created_at']) : time(),
+      'changed' => isset($issue_data['updated_at']) ? strtotime($issue_data['updated_at']) : time(),
+      'non_developer' => $non_dev_flag,
+      'config' => $config,
+      // AI Tracker metadata fields.
+      'blocked_by' => $parsed_metadata['blocked_by'] ?? '',
+      'update_summary' => $parsed_metadata['update_summary'] ?? '',
+      'short_title' => $parsed_metadata['short_title'] ?? '',
+      'short_description' => $parsed_metadata['short_description'] ?? '',
+      'checkin_date' => $parsed_metadata['checkin_date'] ?? '',
+      'due_date' => $parsed_metadata['due_date'] ?? '',
+      'additional_collaborators' => $parsed_metadata['additional_collaborators'] ?? '',
+    ];
+  }
+
 
   /**
    * Extract issue summary/body from drupal.org API data.
