@@ -1271,17 +1271,20 @@ class IssueImportService {
     static $nodeStorage;
     static $gitlab_contributors;
   
-  
-  
-  // Extract tags from GitLab issue labels.
-    $tags = $issue_data['labels'] ?? [];
-    if (is_string($tags)) {
-      $tags = explode(',', $tags);
-    }
-    $tags = array_map('trim', $tags);
 
-    // Process tags through mapping service.
-    $processed_tags = $this->tagMappingService->processTags($tags);
+    // Extract tags and key-value labels from GitLab issue labels.
+    $tags = [];
+    $properties = [];
+
+    $issueLabels = $issue_data['labels'] ?? [];
+    foreach($issueLabels as $label){
+        if (str_contains($label, "::")) {
+          list($key, $value) = explode("::", $label);
+          $properties[$key] = $value;
+        } else {
+          tags[] = $label;
+        }
+    }
 
     // Extract and parse AI Tracker metadata from issue description.
     $issue_description = $issue_data['description'] ?? '';
@@ -1364,11 +1367,11 @@ class IssueImportService {
       'title' => $issue_data['title'] ?? 'Untitled Issue',
       'issue_number' => (string) $issue_data['iid'],
       'issue_url' => $issue_data['web_url'] ?? '',
-      'status' => $this->mapGitLabStatus($issue_data['state'] ?? 'open'),
-      'priority' => $processed_tags['priority'] ?? 'normal',
-      'category' => $processed_tags['category'] ?? 'general',
-      'track' => $processed_tags['track'] ?? '',
-      'workstream' => $processed_tags['workstream'] ?? '',
+      'status' => $this->mapGitLabStatus($properties['state']?? 'active'),
+      'priority' => $properties'priority'] ?? 'normal',
+      'category' => $properties['category'] ?? 'general',
+      'track' => $properties['track'] ?? '',
+      'workstream' => $properties['workstream'] ?? '',
       'issue_summary' => $issue_description,
       'tags' => $tags,
       'module' => $module_node_id,
@@ -1496,6 +1499,23 @@ class IssueImportService {
     return $priority_map[$priority_id] ?? 'normal';
   }
 
+  
+  /**
+   * Map GitLab issue status to our values.
+   */
+  protected function mapGitLabStatus(string $state): string {
+     $status_map = [
+      'active' => 'active',
+      'needsReview' => 'needs_review',
+      'needsWork' => 'needs_work',
+      'rtbc' => 'rtbc',
+      'fixed' => 'fixed',
+      'closed' => 'closed',
+    ];
+
+    return $status_map[$state] ?? 'active';
+  }
+
   /**
    * Check if issue matches status filter.
    */
@@ -1521,7 +1541,7 @@ class IssueImportService {
     // Validate user ID format.
     if (empty($user_id) || !is_numeric($user_id)) {
       return [];
-    }
+  }
 
     $result = $this->requestWithRetry('GET',
       "https://www.drupal.org/api-d7/user/{$user_id}.json");
