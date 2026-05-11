@@ -1267,7 +1267,13 @@ class IssueImportService {
   }
 
   protected function mapGitLabIssue(array $issue_data, ModuleImport $config): array {
-    // Extract tags from GitLab issue labels.
+    /** @var NodeStorageInterface $nodeStorage */
+    static $nodeStorage;
+    static $gitlab_contributors;
+  
+  
+  
+  // Extract tags from GitLab issue labels.
     $tags = $issue_data['labels'] ?? [];
     if (is_string($tags)) {
       $tags = explode(',', $tags);
@@ -1281,17 +1287,54 @@ class IssueImportService {
     $issue_description = $issue_data['description'] ?? '';
     $parsed_metadata = $this->metadataParserService->parseMetadata($issue_description);
 
-    // Extract GitLab assignee information.
-    $gitlab_assignee = '';
-    $assignee_id = 0;
+    // Extract GitLab assignee info and find the corresponding Drupal user.
+    $do_assignees = [];
+
     if (!empty($issue_data['assignees'])) {
+      if (!$nodeStorage) {
+        $nodeStorage = $this->entityTypeManager->getStorage('node');
+      }
       foreach ($issue_data['assignees'] as $assignee) {
-        // GitLab assignees might have username or we might need to resolve.
-        // For now, we use the username if available.
-        $gitlab_assignee = $assignee['username'] ?? $assignee['name'] ?? '';
-        // In a real implementation, we'd try to match this to a local contributor.
-        // For this MVP, we leave assignee_id 0 or attempt to find it.
-        break; 
+        
+        $gitlab_username = $assignee['username'];
+        $gitlab_email = $assignee['email'];
+
+        if (!$gitlab_username && !$gitlab_email) continue;
+
+        $ai_contributor = $gitlab_contributors[$gitlab_username] ?? $gitlab_contributors[$gitlab_email];
+
+        if (!$ai_contributor && $gitlab_username) {
+          // Try to find d.o. user by their GitLab username
+          $candidates = $nodeStorage->loadByProperties(
+            ['field_gitlab_username' => $gitlab_username]
+          );
+          if (!empty($candidates)){
+            $ai_contributor = reset($candidates);
+            $gitlab_contributors[$gitlab_username] = $ai_contributor;
+          }
+        }
+
+        // Contributor not found by GitLab username - try to find by GitLab email
+        if (!$ai_contributor && $gitlab_email) {
+          $candidates = $nodeStorage->loadByProperties(
+            ['field_gitlab_username' => $gitlab_email]
+          );
+          if (!empty($candidates)){
+            $ai_contributor = reset($candidates);
+            $gitlab_contributors[$gitlab_email] = $ai_contributor;
+          }
+        }
+
+
+
+        if ($ai_contributor) {
+          $do_assignees[] = $ai_contributor;
+        } else {
+          \Drupal::logger('ai_dashboard')->warning('Failed to find GitLab user @username among Drupal users', [
+            '@username' => $gitlab_username ?? $gitlab_email,
+          ]);
+        }
+
       }
     }
 
@@ -1305,6 +1348,14 @@ class IssueImportService {
         $non_dev_flag = TRUE;
         break;
       }
+    }
+
+    $assignee_usernames = [];
+    $assignee_ids = [];
+
+    foreach($do_assignees as $do_assignee){
+        $assignee_usernames[] = $do_assignee->get->get('field_drupal_username')->getString();
+        $assignee_ids[] = $do_assignee->id();
     }
 
     return [
@@ -1321,8 +1372,8 @@ class IssueImportService {
       'issue_summary' => $issue_description,
       'tags' => $tags,
       'module' => $module_node_id,
-      'do_assignee' => $gitlab_assignee,
-      'assignee_id' => $assignee_id,
+      'do_assignee' => $assignee_usernames,
+      'assignee_id' => $assignee_ids,
       'created' => isset($issue_data['created_at']) ? strtotime($issue_data['created_at']) : time(),
       'changed' => isset($issue_data['updated_at']) ? strtotime($issue_data['updated_at']) : time(),
       'non_developer' => $non_dev_flag,
