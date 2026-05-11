@@ -1092,7 +1092,7 @@ class IssueImportService {
       $this->updateIssue($existing, $mapped_data);
       return 'updated';
     }
-    elseif ($this->shouldCreateIssue($config, $issue_data)) {
+    elseif ($this->shouldCreateIssue($config, $mapped_data)) {
       $this->createIssue($mapped_data);
       return 'created';
     }
@@ -1511,6 +1511,7 @@ class IssueImportService {
       'rtbc' => 'rtbc',
       'fixed' => 'fixed',
       'closed' => 'closed',
+      'accepted' => 'accepted',
     ];
 
     return $status_map[$state] ?? 'active';
@@ -2354,21 +2355,42 @@ class IssueImportService {
    *
    * @return bool
    */
-  protected function shouldCreateIssue($config, array $issue_data) : bool {
-    // Check status filter - use raw API status values
-    if ($status_filter = $config->getStatusFilter()) {
-      $issue_status = $issue_data['field_issue_status'] ?? '1';
-      if (!in_array($issue_status, $status_filter)) {
+  protected function shouldCreateIssue($config, array $mapped_issue_data) : bool {
+    
+  
+    $status_map = [
+      '1' => 'active',
+      '8' => 'needs_review',
+      '13' => 'needs_work',
+      '14' => 'rtbc',
+      '2' => 'fixed',
+      '3' => 'closed',
+    ];
+
+    $status_filter = $config->getStatusFilter();
+    
+  
+  // Check status filter
+    if ($status_filter) {
+      $status_filter_text = array_map(function ($status_code) {
+        return $status_map[$status_code];
+      }, $status_filter);
+      if (!in_array($mapped_issue_data['status'], $status_filter_text)) {
         return FALSE;
       }
     }
-    
-    // Check tag filter if specified
-    if ($tag_filter = $config->getFilterTags()) {
-      return $this->issueMatchesTagFilter($issue_data, $tag_filter);
+
+    $filter_tags = $config->getFilterTags();
+
+    if(!$filter_tags || empty($filter_tags)) return TRUE;
+
+    foreach ($filter_tags as $filter_tag) {
+      if (in_array($filter_tag, $mapped_issue_data['tags'])) {
+        return TRUE;
+      }
     }
-    
-    return TRUE;
+
+    return FALSE;
   }
 
   /**
