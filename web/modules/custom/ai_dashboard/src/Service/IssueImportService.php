@@ -1085,7 +1085,7 @@ class IssueImportService {
     $mapped_data = $this->mapIssueData($issue_data, $source_type, $config);
 
     // Check for existing issue by external ID.
-    $existing = $this->findExistingIssue($mapped_data['external_id'], $source_type);
+    $existing = $this->findExistingIssue($mapped_data);
 
     if ($existing) {
       // Update existing issue.
@@ -1598,11 +1598,16 @@ class IssueImportService {
   /**
    * Find existing issue by external ID.
    */
-  protected function findExistingIssue(string $external_id, string $source_type): ?Node {
+  protected function findExistingIssue(array $mapped_data): ?Node {
+
+    $external_id = $mapped_data['external_id'];
+
+    $cache_id = $this->createCacheId($mapped_data);
+
     // First check if we've already processed this issue in this import session.
-    if (isset(static::$importSessionCache[$external_id])) {
+    if (isset(static::$importSessionCache[$cache_id])) {
       $node_storage = $this->entityTypeManager->getStorage('node');
-      return $node_storage->load(static::$importSessionCache[$external_id]);
+      return $node_storage->load(static::$importSessionCache[$cache_id]);
     }
 
     $node_storage = $this->entityTypeManager->getStorage('node');
@@ -1612,6 +1617,7 @@ class IssueImportService {
 
     $query = $node_storage->getQuery()
       ->condition('type', 'ai_issue')
+      ->condition('field_issue_module', $mapped_data['module'])
       ->condition('field_issue_number', $external_id)
       ->accessCheck(FALSE)
       ->range(0, 1);
@@ -1621,7 +1627,7 @@ class IssueImportService {
     if (!empty($result)) {
       $node_id = reset($result);
       // Cache this for the current import session.
-      static::$importSessionCache[$external_id] = $node_id;
+      static::$importSessionCache[$cache_id] = $node_id;
       return $node_storage->load($node_id);
     }
 
@@ -1765,7 +1771,7 @@ class IssueImportService {
 
     // Cache this newly created issue to prevent duplicates in
     // the same import session.
-    static::$importSessionCache[$mapped_data['issue_number']] = $issue->id();
+    static::$importSessionCache[$this->createCacheId($mapped_data)] = $issue->id();
 
     $this->invalidateImportCaches();
     return $issue;
@@ -1910,7 +1916,7 @@ class IssueImportService {
     }
 
     // Cache this updated issue in the session.
-    static::$importSessionCache[$mapped_data['issue_number']] = $issue->id();
+    static::$importSessionCache[$this->createCacheId($mapped_data)] = $issue->id();
 
     $this->invalidateImportCaches();
     return $issue;
@@ -2470,6 +2476,12 @@ class IssueImportService {
     }
     while (!$result['success'] && (++$result['attempts']) < self::MAX_TRIES);
     return $result;
+  }
+
+  // Deduplicate issues with same external ids but different sources
+
+  protected function createCacheId(array $mapped_data){
+        return $mapped_data['source_type'] . '--' . $mapped_data['external_id'];
   }
 
 }
