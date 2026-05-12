@@ -1556,14 +1556,14 @@ class IssueImportService {
    * Check if issue matches tag filter.
    */
   protected function issueMatchesTagFilter(array $issue_data, array $filter_tags): bool {
-    if (empty($filter_tags)) {
-      return TRUE;
-    }
+     if (empty($filter_tags)) {
+       return TRUE;
+     }
 
-    $issue_tags = [];
-    if (isset($issue_data['taxonomy_vocabulary_9']) && is_array($issue_data['taxonomy_vocabulary_9'])) {
-      foreach ($issue_data['taxonomy_vocabulary_9'] as $tag) {
-        if (!isset($tag['name'])) {
+     $issue_tags = [];
+     if (isset($issue_data['taxonomy_vocabulary_9']) && is_array($issue_data['taxonomy_vocabulary_9'])) {
+       foreach ($issue_data['taxonomy_vocabulary_9'] as $tag) {
+                 if (!isset($tag['name'])) {
           $tag['name'] = $this->resolveTagName($tag['id']);
         }
         if (isset($tag['name'])) {
@@ -2475,6 +2475,46 @@ class IssueImportService {
       }
     }
       
+  }
+
+
+  /**
+   * Returns source-specific API details.
+   *
+   * @param ModuleImport $config
+   *   The import configuration.
+   *
+   * @return array
+   *   Array containing url, base_params, and pagination_type.
+   */
+  private function getSourceApiDetails(ModuleImport $config): array {
+    $source_type = $config->getSourceType();
+    $project_id = $config->getProjectId();
+
+    switch ($source_type) {
+      case 'drupal_org':
+        return [
+          'url' => 'https://www.drupal.org/api-d7/node.json',
+          'base_params' => [
+            'type' => 'project_issue',
+            'field_project' => $project_id,
+            'sort' => 'changed',
+            'direction' => 'DESC',
+          ],
+          'pagination_type' => 'drupal_org',
+        ];
+
+      case 'gitlab':
+        $encoded_project_id = urlencode($project_id);
+        return [
+          'url' => "https://gitlab.com/api/v4/projects/{$encoded_project_id}/issues",
+          'base_params' => [],
+          'pagination_type' => 'gitlab',
+        ];
+
+      default:
+        throw new \InvalidArgumentException("Unsupported source type: {$source_type}");
+    }
   }
 
 }
