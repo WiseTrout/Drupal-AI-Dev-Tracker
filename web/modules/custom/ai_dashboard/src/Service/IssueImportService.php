@@ -1249,8 +1249,8 @@ class IssueImportService {
       'issue_summary' => $issue_summary,
       'tags' => $tags,
       'module' => $module_node_id,
-      'do_assignee' => $do_assignee,
-      'assignee_id' => $assignee_id,
+      'do_assignee' => [$do_assignee],
+      'assignee_id' => [$assignee_id],
       'created' => $issue_data['created'] ?? time(),
       'changed' => $issue_data['changed'] ?? time(),
       'non_developer' => $non_dev_flag,
@@ -1681,7 +1681,7 @@ class IssueImportService {
       'field_issue_summary' => $mapped_data['issue_summary'] ?? '',
       'field_issue_tags' => !empty($mapped_data['tags']) ? array_map(function($tag) { return ['value' => $tag]; }, $mapped_data['tags']) : [],
       'field_issue_module' => $mapped_data['module'] ?? '',
-      'field_issue_do_assignee' => $mapped_data['do_assignee'] ?? '',
+      'field_issue_do_assignee' => $mapped_data['do_assignee']? implode(',', $mapped_data['do_assignee']) : '',
       'created' => $mapped_data['created'],
       'changed' => $mapped_data['changed'],
       'status' => 1,
@@ -1748,25 +1748,9 @@ class IssueImportService {
 
     $issue->save();
 
-    // Create AssignmentRecord for current week if assignee exists.
+    // Create AssignmentRecords for current week if assignees exist.
     if (!empty($mapped_data['assignee_id'])) {
-      $current_week_id = \Drupal\ai_dashboard\Entity\AssignmentRecord::getCurrentWeekId();
-      $issue_status = $mapped_data['status'] ?? 'active';
-      
-      // Check if assignment already exists to avoid duplicates.
-      if (!\Drupal\ai_dashboard\Entity\AssignmentRecord::assignmentExists(
-        $issue->id(),
-        $mapped_data['assignee_id'],
-        $current_week_id
-      )) {
-        \Drupal\ai_dashboard\Entity\AssignmentRecord::createAssignment(
-          $issue->id(),
-          $mapped_data['assignee_id'],
-          $current_week_id,
-          'drupal_org_sync',
-          $issue_status
-        );
-      }
+      $this->createAssignmentRecords($issue, $mapped_data);
     }
 
     // Cache this newly created issue to prevent duplicates in
@@ -1803,7 +1787,7 @@ class IssueImportService {
     $issue->set('field_issue_summary', $mapped_data['issue_summary'] ?? '');
     $issue->set('field_issue_tags', !empty($mapped_data['tags']) ? array_map(function($tag) { return ['value' => $tag]; }, $mapped_data['tags']) : []);
     $issue->set('field_issue_module', $mapped_data['module'] ?? '');
-    $issue->set('field_issue_do_assignee', $mapped_data['do_assignee'] ?? '');
+    $issue->set('field_issue_do_assignee', $mapped_data['do_assignee']? implode(',', $mapped_data['do_assignee']) : '');
     // Update non-developer flag if provided.
     if (isset($mapped_data['non_developer']) && $issue->hasField('field_issue_non_developer')) {
       $issue->set('field_issue_non_developer', $mapped_data['non_developer'] ? 1 : 0);
@@ -1894,25 +1878,10 @@ class IssueImportService {
 
     $issue->save();
 
-    // Create AssignmentRecord for current week if assignee exists.
+    // Create AssignmentRecords for current week if assignees exist.
     if (!empty($mapped_data['assignee_id'])) {
-      $current_week_id = \Drupal\ai_dashboard\Entity\AssignmentRecord::getCurrentWeekId();
-      $issue_status = $mapped_data['status'] ?? 'active';
+      $this->createAssignmentRecords($issue, $mapped_data);
       
-      // Check if assignment already exists to avoid duplicates.
-      if (!\Drupal\ai_dashboard\Entity\AssignmentRecord::assignmentExists(
-        $issue->id(),
-        $mapped_data['assignee_id'],
-        $current_week_id
-      )) {
-        \Drupal\ai_dashboard\Entity\AssignmentRecord::createAssignment(
-          $issue->id(),
-          $mapped_data['assignee_id'],
-          $current_week_id,
-          'drupal_org_sync',
-          $issue_status
-        );
-      }
     }
 
     // Cache this updated issue in the session.
@@ -2482,6 +2451,30 @@ class IssueImportService {
 
   protected function createCacheId(array $mapped_data){
         return $mapped_data['source_type'] . '--' . $mapped_data['external_id'];
+  }
+
+  protected function createAssignmentRecords(Node $issue, array $mapped_data){
+    $current_week_id = \Drupal\ai_dashboard\Entity\AssignmentRecord::getCurrentWeekId();
+    $issue_status = $mapped_data['status'] ?? 'active';
+    $assignment_source = $mapped_data['source_type'] . '_sync';
+
+    foreach($mapped_data['assignee_id'] as $assignee_id){
+      // Check if assignment already exists to avoid duplicates.
+      if (!\Drupal\ai_dashboard\Entity\AssignmentRecord::assignmentExists(
+        $issue->id(),
+        $assignee_id,
+        $current_week_id
+      )) {
+        \Drupal\ai_dashboard\Entity\AssignmentRecord::createAssignment(
+          $issue->id(),
+          $assignee_id,
+          $current_week_id,
+          $assignment_source,
+          $issue_status
+        );
+      }
+    }
+      
   }
 
 }
