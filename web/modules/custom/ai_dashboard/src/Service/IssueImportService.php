@@ -36,6 +36,12 @@ class IssueImportService {
   const RETRY_AFTER = 30;
 
   /**
+   * Default value for max issues, when none is set in config.
+   */
+
+  const DEFAULT_MAX_ISSUES = 1000;
+
+  /**
    * The entity type manager.
    *
    * @var \Drupal\Core\Entity\EntityTypeManagerInterface
@@ -218,7 +224,7 @@ class IssueImportService {
       $source_type = $config->getSourceType();
       $project_id = $this->resolveProjectId($config);
       $max_issues = $config->getMaxIssues();
-      $max_issues = $max_issues ? (int) $max_issues : 1000;
+      $max_issues = $max_issues ? (int) $max_issues : self::DEFAULT_MAX_ISSUES;
 
       $logger->info('Starting import from @source for project @project', [
         '@source' => $source_type,
@@ -431,8 +437,12 @@ class IssueImportService {
   /**
    * Import multiple status filters separately to ensure all issues are captured.
    */
-  protected function importMultipleStatuses(string $project_id, array $filter_tags, array $status_filter, int $max_issues, ?string $date_filter, ModuleImport $config): array {
+  protected function importMultipleStatusesFromDrupalOrg(ModuleImport $config): array {
     $logger = $this->loggerFactory->get('ai_dashboard');
+
+    $max_issues = $config->getMaxIssues();
+    $max_issues = $max_issues ? (int) $max_issues : self::DEFAULT_MAX_ISSUES;
+    $status_filter = $config->getStatusFilter();
 
     $combined_results = [
       'success' => TRUE,
@@ -464,7 +474,7 @@ class IssueImportService {
 
       try {
         // Import this single status with proportional limit.
-        $single_results = $this->importFromDrupalOrg($project_id, $filter_tags, [$single_status], $issues_per_status, $date_filter, $config);
+        $single_results = $this->importFromApi($config, $single_status);
 
         // Combine results.
         $combined_results['imported'] += $single_results['imported'];
@@ -644,32 +654,44 @@ class IssueImportService {
   /**
    * Import from GitLab.
    *
-   * @param string $project_id
-   *   The GitLab project ID or path.
-   * @param array $filter_tags
-   *   Tags to filter by.
-   * @param array $status_filter
-   *   Status IDs to filter by.
-   * @param int $max_issues
-   *   Maximum issues to import.
-   * @param string|null $date_to_filter
-   *   Date filter for created date.
    * @param ModuleImport $config
    *   The import configuration node.
+   * 
+   * @param $single_status
+   *  To be set when we want to only import issues with given status. This is used for DO imports where we cannot reliably import several statuses at once.
    *
    * @return array
    *   Import results.
    */
-  protected function importFromApi(ModuleImport $config): array {
+  protected function importFromApi(ModuleImport $config, $single_status = NULL): array {
     $this->clearImportSessionCache();
     $logger = $this->loggerFactory->get('ai_dashboard');
-
     $source_type = $config->getSourceType();
+
+    $do_status = $single_status;
+
+    // Handle multiple status filters by processing each one separately
+    // as drupal.org API doesn't support comma-separated status values reliably
+    if ($source_type === "drupal_org" && !$do_status) {
+        $status_filter = $config->getStatusFilter();
+          if($status_filter){
+            if (!is_array($status_filter)) {
+              $status_filter = explode(',', $status_filter);
+            }
+            if(count($status_filter) > 1){
+              return $this->importMultipleStatusesFromDrupalOrg($config);
+            }else{
+              $do_status = reset($status_filter);
+            }
+          }
+    }
+
+    
     $max_issues = $config->getMaxIssues();
-    $max_issues = $max_issues ? (int) $max_issues : 1000;
+    $max_issues = $max_issues ? (int) $max_issues : self::DEFAULT_MAX_ISSUES;
 
     $api_details = $this->getSourceApiDetails($config);
-    $params = $this->getSourceSpecificFilters($config, $api_details['base_params']);
+    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], ['single_status' => $do_status]);
 
     try {
       $results = [
@@ -2228,19 +2250,12 @@ class IssueImportService {
    * @return array
    *   The modified parameters with source-specific filters.
    */
-  private function getSourceSpecificFilters(ModuleImport $config, array $base_params): array {
+  private function getSourceSpecificFilters(ModuleImport $config, array $base_params, array $extra_data = []): array {
     $params = $base_params;
     $source_type = $config->getSourceType();
 
     switch ($source_type) {
       case 'drupal_org': 
-        if ($status_filter = $config->getStatusFilter()) {
-          if (!is_array($status_filter)) {
-            $status_filter = array_status_filter(explode(',', $status_filter));
-          }
-          // $params['field_issue_status'] = count($status_filter) > 1 ? $status_filter : reset($status_filter);
-          $params['field_issue_status'] = $status_filter;
-          }
           if ($filter = $this->buildTagIds($config->getFilterTags())) {
             $params['taxonomy_vocabulary_9'] = implode(',', $filter);
           }
@@ -2252,6 +2267,9 @@ class IssueImportService {
             if ($timestamp) {
               $params['changed'] = '>=' . $timestamp;
             }
+          if($extra_data['single_status']){
+            $params['field_issue_status'] = $extra_data['single_status'];
+          }
         }
         break;
       case 'gitlab':
