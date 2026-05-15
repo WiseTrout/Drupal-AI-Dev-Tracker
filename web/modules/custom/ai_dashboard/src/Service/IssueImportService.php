@@ -129,80 +129,54 @@ class IssueImportService {
    */
   public function buildImportBatch(ModuleImport $config): array {
     $batchBuilder = new BatchBuilder();
-    // Build the API URL for single status import.
-    $url = 'https://www.drupal.org/api-d7/node.json';
+    $api_details = $this->getSourceApiDetails($config);
+    $params = $this->getSourceSpecificFilters($config, $api_details['base_params']);
     $max_issues = $config->getMaxIssues();
-    $params = [
-      'type' => 'project_issue',
-      'field_project' => $config->getProjectId(),
-      'sort' => 'changed',
-      'direction' => 'DESC',
-    ];
-
-    if ($filter = $config->getStatusFilter()) {
-      if (!is_array($filter)) {
-        $filter = array_filter(explode(',', $filter));
-      }
-      $params['field_issue_status'] = count($filter) > 1 ? $filter : reset($filter);
-    }
-    if ($filter = $this->buildTagIds($config->getFilterTags())) {
-      $params['taxonomy_vocabulary_9'] = implode(',', $filter);
-    }
-    if ($component = $config->getFilterComponent()) {
-      $params['field_issue_component'] = $component;
-    }
-
-    // Add date filter if specified.
-    if ($config->getDateFilter()) {
-      $timestamp = strtotime($config->getDateFilter());
-      if ($timestamp) {
-        $params['changed'] = '>=' . $timestamp;
-      }
-    }
+    $max_issues = $max_issues ? (int) $max_issues : self::DEFAULT_MAX_ISSUES;
+    $source_type = $config->getSourceType();
+    $url = $api_details['url'];
 
     try {
+
       $page = 0;
-      $per_page = self::BATCH_SIZE;
+      $per_page_max = $api_details['per_page_max'] ?? self::BATCH_SIZE;
       $total_processed = 0;
 
       do {
-        // Set pagination parameters.
-        $current_params = $params;
-        $current_params['limit'] = min($per_page, $max_issues - $total_processed);
-        $current_params['page'] = $page;
+        $per_page = min($per_page_max, $max_issues - $total_processed);
+        $current_params = $this->getPaginationParams($source_type, $params, $per_page, $page);
+
+        $headers = ['User-Agent' => self::USER_AGENT];
+        if (isset($api_details['auth'])) {
+          $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
+        }
 
         $response = $this->httpClient->request('GET', $url, [
           'query' => $current_params,
           // Increased timeout for large imports.
           'timeout' => 60,
-          'headers' => [
-            'User-Agent' => self::USER_AGENT,
-          ],
+          'headers' => $headers,
         ]);
 
-        $data = json_decode($response->getBody()->getContents(), TRUE);
+        $response_body = json_decode($response->getBody()->getContents(), TRUE);
+        $issues_data = $this->deriveIssuesData($source_type, $response_body);
 
-        if (!isset($data['list']) || !is_array($data['list'])) {
-          throw new \Exception('Invalid response format from drupal.org API');
-        }
-
-        $page_issues = count($data['list']);
-        if ($page_issues === 0) {
-          // No more issues.
+        if (empty($issues_data)) {
           break;
         }
+
+        $page_issues = count($issues_data);
         $total_processed += $page_issues;
         $batchBuilder->addOperation(
           [IssueBatchImportService::class, 'batchOperationProcessIssueBatch'],
-          [$data['list'], $config->id()]);
+          [$issues_data, $config->id()]);
         $page++;
-      }
-        // Continue if we got a full page and haven't reached the limit.
-      while ($page_issues === $per_page && $total_processed < $max_issues);
+      } while ($page_issues >= $per_page_max && $total_processed < $max_issues);
+
       return $batchBuilder->toArray();
     }
-    catch (RequestException $e) {
-      throw new \Exception('Failed to fetch data from drupal.org: ' . $e->getMessage());
+    catch (\Exception $e) {
+      throw new \Exception("Failed to fetch data from {$source_type}: " . $e->getMessage());
     }
   }
 
@@ -715,7 +689,7 @@ class IssueImportService {
             'User-Agent' => self::USER_AGENT,
         ];
 
-        if($api_details['auth']){
+        if(issset($api_details['auth'])){
           $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
         }
 
@@ -736,7 +710,10 @@ class IssueImportService {
 
 
         $page_issues = count($issues_data);
-        $total_processed += $page_issues;
+
+        if($page_issues === 0){
+          break;
+        }
 
         foreach ($issues_data as $issue_data) {
           if ($total_processed > $max_issues) {
