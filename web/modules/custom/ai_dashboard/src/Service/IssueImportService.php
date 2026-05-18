@@ -729,6 +729,7 @@ class IssueImportService {
             } elseif ($result === 'skipped') {
               $results['skipped']++;
             }
+            $total_processed++;
           }
           catch (\Exception $e) {
             $logger->warning('Failed to process @source issue @id: @message', [
