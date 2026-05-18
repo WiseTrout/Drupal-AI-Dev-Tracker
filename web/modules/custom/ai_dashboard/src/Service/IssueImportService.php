@@ -131,8 +131,7 @@ class IssueImportService {
     $batchBuilder = new BatchBuilder();
     $api_details = $this->getSourceApiDetails($config);
     $params = $this->getSourceSpecificFilters($config, $api_details['base_params']);
-    $max_issues = $config->getMaxIssues();
-    $max_issues = $max_issues ? (int) $max_issues : self::DEFAULT_MAX_ISSUES;
+    $max_issues = $this->getMaxIssues($config);
     $source_type = $config->getSourceType();
     $url = $api_details['url'];
 
@@ -197,8 +196,7 @@ class IssueImportService {
     try {
       $source_type = $config->getSourceType();
       $project_id = $this->resolveProjectId($config);
-      $max_issues = $config->getMaxIssues();
-      $max_issues = $max_issues ? (int) $max_issues : self::DEFAULT_MAX_ISSUES;
+      $max_issues = $this->getMaxIssues($config);
 
       $logger->info('Starting import from @source for project @project', [
         '@source' => $source_type,
@@ -233,7 +231,7 @@ class IssueImportService {
   /**
    * Start a batch import process for large imports.
    */
-  protected function startBatchImport(ModuleImport $config, string $source_type, string $project_id, array $filter_tags, array $status_filter, int $max_issues, ?string $date_filter): array {
+  protected function startBatchImport(ModuleImport $config): array {
     $batch = [
       'title' => t('Importing Issues'),
       'operations' => [],
@@ -244,11 +242,18 @@ class IssueImportService {
       'file' => \Drupal::service('extension.list.module')->getPath('ai_dashboard') . '/src/Service/IssueImportService.php',
     ];
 
-    // Calculate number of batches (50 issues per batch due to API limit)
-    $batch_size = 50;
+    // Calculate number of batches
+    $api_details = $this->getSourceApiDetails($config);
+    $batch_size = $api_details['per_page_max'] ?? self::BATCH_SIZE;
     
-    // Handle multiple status filters by creating separate batch operations for each status
-    if (count($status_filter) > 1) {
+    
+    $source_type = $config->getSourceType();
+    $status_filter = $config->getStatusFilter();
+    $max_issues = $this->getMaxIssues($config);
+
+    // Handle multiple status filters for DO issues by creating separate batch operations for each status
+
+    if ($source_type === 'drupal_org' && count($status_filter) > 1) {
       $issues_per_status = max(1, floor($max_issues / count($status_filter)));
       $batches_per_status = ceil($issues_per_status / $batch_size);
       
@@ -257,38 +262,29 @@ class IssueImportService {
           $batch['operations'][] = [
             '\Drupal\ai_dashboard\Service\IssueImportService::batchProcess',
             [
-              $config->id(),
-              $source_type,
-              $project_id,
-              $filter_tags,
-              [$single_status], // Single status array
+              $config,
               // Offset.
               $i * $batch_size,
               // Limit.
               min($batch_size, $issues_per_status - ($i * $batch_size)),
-              $date_filter,
+              $single_status, // One specific status to import
             ],
           ];
         }
       }
     } else {
-      // Single status or no status filter - use original logic
+      //GtiLab import or single status/no status filter DO import - use original logic
       $num_batches = ceil($max_issues / $batch_size);
       
       for ($i = 0; $i < $num_batches; $i++) {
         $batch['operations'][] = [
           '\Drupal\ai_dashboard\Service\IssueImportService::batchProcess',
           [
-            $config->id(),
-            $source_type,
-            $project_id,
-            $filter_tags,
-            $status_filter,
+            $config,
             // Offset.
             $i * $batch_size,
             // Limit.
             min($batch_size, $max_issues - ($i * $batch_size)),
-            $date_filter,
           ],
         ];
       }
@@ -342,14 +338,7 @@ class IssueImportService {
     }
 
     try {
-      switch ($source_type) {
-        case 'drupal_org':
-          $results = $import_service->importFromDrupalOrgBatch($project_id, $filter_tags, $status_filter, $offset, $limit, $date_filter, $config);
-          break;
-
-        default:
-          throw new \InvalidArgumentException("Batch import not supported for source type: {$source_type}");
-      }
+          $results = $import_service->importFromApiBatch($config, $offset, $limit);
 
       // Update context with results.
       if (!isset($context['results']['imported'])) {
@@ -414,8 +403,7 @@ class IssueImportService {
   protected function importMultipleStatusesFromDrupalOrg(ModuleImport $config): array {
     $logger = $this->loggerFactory->get('ai_dashboard');
 
-    $max_issues = $config->getMaxIssues();
-    $max_issues = $max_issues ? (int) $max_issues : self::DEFAULT_MAX_ISSUES;
+    $max_issues = $this->getMaxIssues($config);
     $status_filter = $config->getStatusFilter();
 
     $combined_results = [
@@ -486,20 +474,19 @@ class IssueImportService {
   }
 
   /**
-   * Import issues from drupal.org API for batch processing.
+   * Import issues from API for batch processing.
    */
-  public function importFromDrupalOrgBatch(string $project_id, array $filter_tags, array $status_filter, int $offset, int $limit, ?string $date_filter, ModuleImport $config): array {
-    // Clear import session cache if this is the first batch (offset 0)
+  public function importFromApiBatch(ModuleImport $config, int $offset, int $limit, $single_status = NULL): array {
+    // Clear import session cache if this is the first batch (offset 0).
     if ($offset === 0) {
       $this->clearImportSessionCache();
     }
 
     $logger = $this->loggerFactory->get('ai_dashboard');
-
-    // For batch processing, each operation handles exactly one API page.
-    // The offset and limit should align with API page boundaries.
-    $api_page_size = 50;
-    $page_number = floor($offset / $api_page_size);
+    $source_type = $config->getSourceType();
+    $api_details = $this->getSourceApiDetails($config);
+    $per_page_max = $api_details['per_page_max'] ?? self::BATCH_SIZE;
+    $page_number = floor($offset / $per_page_max);
 
     $results = [
       'success' => TRUE,
@@ -510,71 +497,36 @@ class IssueImportService {
       'message' => '',
     ];
 
-    // Build the API URL for this specific page.
-    $url = 'https://www.drupal.org/api-d7/node.json';
-    $params = [
-      'type' => 'project_issue',
-      'field_project' => $project_id,
-      'limit' => min($api_page_size, $limit),
-      'page' => $page_number,
-      'sort' => 'changed',
-      'direction' => 'DESC',
-    ];
+    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], ['single_status' => $single_status]);
+    $params = $this->getPaginationParams($source_type, $params, min($per_page_max, $limit), $page_number);
 
-    // Add status filter if specified - use first status only for batch processing
-    // Multiple statuses are handled by creating separate batch operations
-    if (!empty($status_filter)) {
-      $params['field_issue_status'] = is_array($status_filter) ? $status_filter[0] : $status_filter;
-    }
-
-    // Add component filter if specified.
-    if ($component = $config->getFilterComponent()) {
-      $params['field_issue_component'] = $component;
-    }
-
-    // Add date filter if specified.
-    if ($date_filter) {
-      $timestamp = strtotime($date_filter);
-      if ($timestamp) {
-        $params['changed'] = '>=' . $timestamp;
-      }
+    $headers = ['User-Agent' => self::USER_AGENT];
+    if (isset($api_details['auth'])) {
+      $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
     }
 
     try {
-      $response = $this->httpClient->request('GET', $url, [
+      $response = $this->httpClient->request('GET', $api_details['url'], [
         'query' => $params,
         'timeout' => 60,
-        'headers' => [
-          'User-Agent' => self::USER_AGENT,
-        ],
+        'headers' => $headers,
       ]);
 
-      $data = json_decode($response->getBody()->getContents(), TRUE);
+      $response_body = json_decode($response->getBody()->getContents(), TRUE);
+      $issues_data = $this->deriveIssuesData($source_type, $response_body);
 
-      if (!isset($data['list']) || !is_array($data['list'])) {
-        throw new \Exception('Invalid API response format');
-      }
-
-      $page_results = count($data['list']);
-      if ($page_results === 0) {
+      if (empty($issues_data)) {
         $results['message'] = sprintf('Page %d: No more issues available', $page_number);
         return $results;
       }
 
       $total_processed = 0;
-      foreach ($data['list'] as $issue_data) {
+      foreach ($issues_data as $issue_data) {
         if ($total_processed >= $limit) {
-          // Don't exceed the requested limit for this batch.
           break;
         }
 
         try {
-          // Filter by tags if specified.
-          if (!empty($filter_tags) && !$this->issueMatchesTagFilter($issue_data, $filter_tags)) {
-            $results['skipped']++;
-            $total_processed++;
-            continue;
-          }
 
           $result = $this->processIssue($issue_data, $config);
           if ($result === 'created') {
@@ -588,7 +540,7 @@ class IssueImportService {
         }
         catch (\Exception $e) {
           $logger->warning('Failed to process issue @id: @message', [
-            '@id' => $issue_data['nid'] ?? 'unknown',
+            '@id' => $issue_data['nid'] ?? $issue_data['iid'] ?? 'unknown',
             '@message' => $e->getMessage(),
           ]);
           $results['errors']++;
@@ -604,10 +556,8 @@ class IssueImportService {
         $results['skipped'],
         $results['errors']
       );
-
     }
     catch (\Exception $e) {
-      // Check if this is a 404 error (no more pages available)
       if (strpos($e->getMessage(), '404') !== FALSE || strpos($e->getMessage(), 'Page doesn') !== FALSE) {
         $results['message'] = sprintf('Page %d: No more data available (reached end of results)', $page_number);
         $logger->info('Reached end of available data at page @page', ['@page' => $page_number]);
@@ -626,7 +576,7 @@ class IssueImportService {
   }
 
   /**
-   * Import from GitLab.
+   * Import from API.
    *
    * @param ModuleImport $config
    *   The import configuration node.
@@ -661,8 +611,7 @@ class IssueImportService {
     }
 
     
-    $max_issues = $config->getMaxIssues();
-    $max_issues = $max_issues ? (int) $max_issues : self::DEFAULT_MAX_ISSUES;
+    $max_issues = $this->getMaxIssues($config);
 
     $api_details = $this->getSourceApiDetails($config);
     $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], ['single_status' => $do_status]);
@@ -2283,7 +2232,7 @@ class IssueImportService {
     return $params;
   }
 
-  protected function getPaginationParams(string $source_type, array $params , int $per_page, int $current_page): array{
+  protected function getPaginationParams(string $source_type, array $params, int $per_page, int $current_page): array{
         
     $params_with_pagination = $params;
   
@@ -2318,6 +2267,10 @@ class IssueImportService {
         default:
           throw new \InvalidArgumentException("Unsupported source type: {$source_type}");
       }
+    }
+
+    protected function getMaxIssues($config){
+      return $config->getMaxIssues ?? self::DEFAULT_MAX_ISSUES;
     }
 
 }
