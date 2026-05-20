@@ -12,9 +12,11 @@ use Drupal\node\Entity\Node;
 /**
  * Dedicated service for batch import operations.
  */
-class IssueBatchImportService {
+class IssueImportOrchestrationService {
 
   use StringTranslationTrait;
+
+  const DEFAULT_MAX_ISSUES = 1000;
 
   /**
    * The entity type manager.
@@ -98,11 +100,180 @@ class IssueBatchImportService {
         '@max' => $max_issues,
       ]);
 
-      // For multiple statuses, create operations for each status.
-      if (count($status_filter) > 1) {
-        return $this->createMultiStatusBatch($config, $source_type, $project_id,
-          $filter_tags, $status_filter, $date_filter, $max_issues);
+      $batch = [
+        'title' => $this->t('Importing Issues from @source', ['@source' => ucfirst($source_type)]),
+        'operations' => [],
+        'init_message' => $this->t('Initializing import of up to @max issues...', ['@max' => $max_issues]),
+        'progress_message' => $this->t('Processed @current out of @total operations.'),
+        'error_message' => $this->t('Issue import has encountered an error.'),
+        'finished' => [self::class, 'batchFinished'],
+        'file' => \Drupal::service('extension.list.module')->getPath('ai_dashboard') . '/src/Service/IssueBatchImportService.php',
+      ];
+
+      // STRATEGY 1: Multi-status Drupal.org import (multiple operations)
+      if ($source_type === 'drupal_org' && count($status_filter) > 1) {
+
+        $issues_per_status = max(1, floor($max_issues / count($status_filter)));
+        $batches_per_status = ceil($issues_per_status / $batch_size);
+
+        foreach ($status_filter as $single_status) {
+          for ($i = 0; $i < $batches_per_status; $i++) {
+          $batch['operations'][] = [
+            [self::class, 'batchOperationSingleStatus'],
+            [
+              $config,
+              // Offset.
+              $i * $batch_size,
+              // Limit.
+              min($batch_size, $issues_per_status - ($i * $batch_size)),
+              // One specific status to import
+              $single_status, 
+            ],
+          ];
+          }
+        }
       }
+      // STRATEGY 2: Standard pagination-based import (for GitLab or single-status Drupal.org)
+      else {
+        $api_details = $this->issueImportService->getSourceApiDetails($config);
+        $per_page_max = $api_details['per_page_max'] ?? 50;
+        $params = $this->issueImportService->getSourceSpecificFilters($config, $api_details['base_params']);
+        
+        $page = 0;
+        $total_processed = 0;
+
+          do {
+            $per_page = min($per_page_max, $max_issues - $total_processed);
+            if ($per_page <= 0) break;
+
+            $current_params = $this->issueImportService->getPaginationParams($source_type, $params, $per_page, $page);
+            
+            $batch['operations'][] = [
+              [self::class, 'batchOperation'],
+              [
+                $config->id(),
+                $source_type,
+                $project_id,
+                $filter_tags,
+                $status_filter,
+                $date_filter,
+                $total_processed, // This is the offset
+                $per_page,
+              ],
+            ];
+
+            $page++;
+            $total_processed += $per_page;
+
+            if ($total_processed >= $max_issues) break;
+
+          } while ($total_processed < $max_issues);
+
+      }
+
+      batch_set($batch);
+
+      if (PHP_SAPI !== 'cli') {
+        \Drupal::state()->set('ai_dashboard.batch_start_time', time());
+        return [
+          'success' => TRUE,
+          'message' => $this->t('Batch import started.'),
+          'redirect' => TRUE,
+          'imported' => 0,
+          'skipped' => 0,
+          'errors' => 0,
+        ];
+      }
+
+      $batch =& batch_get();
+      $batch['progressive'] = FALSE;
+      batch_process();
+
+      return [
+        'success' => TRUE,
+        'message' => $this->t('Batch import completed via CLI.'),
+      ];
+    } catch (\Exception $e) {
+      $logger->error('Failed to start batch import: @message', ['@message' => $e->getMessage()]);
+      return [
+        'success' => FALSE,
+        'message' => $this->t('Failed to start batch import: @error', ['@error' => $e->getMessage()]),
+      ];
+    }
+  }
+      }
+      // STRATEGY 2: Standard pagination-based import (for GitLab or single-status Drupal.org)
+      else {
+        $api_details = $this->issueImportService->getSourceApiDetails($config);
+        $per_page_max = $api_details['per_page_max'] ?? 50;
+        $params = $this->issueImportService->getSourceSpecificFilters($config, $api_details['base_params']);
+        
+        $page = 0;
+        $total_processed = 0;
+
+        // We don't know the total number of issues upfront for GitLab, but we can estimate/loop.
+        // We follow the logic from IssueImportService::buildImportBatch
+        do {
+          $per_page = min($per_page_max, $max_issues - $total_processed);
+          if ($per_page <= 0) break;
+
+          $current_params = $this->issueImportService->getPaginationParams($source_type, $params, $per_page, $page);
+          
+          $batch['operations'][] = [
+            [self::class, 'batchOperation'],
+            [
+              $config->id(),
+              $source_type,
+              $project_id,
+              $filter_tags,
+              $status_filter,
+              $date_filter,
+              $total_processed, // This is the offset
+              $per_page,
+            ],
+          ];
+
+          // We need to peek ahead or increment to build the batch. 
+          // Since we are building the list of operations, we increment page.
+          $page++;
+          $total_processed += $per_page;
+
+          // Safety break to prevent infinite loop in batch builder if API is weird
+          if ($total_processed >= $max_issues) break;
+
+        } while ($total_processed < $max_issues);
+      }
+
+      batch_set($batch);
+
+      if (PHP_SAPI !== 'cli') {
+        \Drupal::state()->set('ai_dashboard.batch_start_time', time());
+        return [
+          'success' => TRUE,
+          'message' => $this->t('Batch import started.'),
+          'redirect' => TRUE,
+          'imported' => 0,
+          'skipped' => 0,
+          'errors' => 0,
+        ];
+      }
+
+      $batch =& batch_get();
+      $batch['progressive'] = FALSE;
+      batch_process();
+
+      return [
+        'success' => TRUE,
+        'message' => $this->t('Batch import completed via CLI.'),
+      ];
+    } catch (\Exception $e) {
+      $logger->error('Failed to start batch import: @message', ['@message' => $e->getMessage()]);
+      return [
+        'success' => FALSE,
+        'message' => $this->t('Failed to start batch import: @error', ['@error' => $e->getMessage()]),
+      ];
+    }
+  }
 
       // Calculate total estimated operations based on API page size.
       // drupal.org API returns max 50 issues per page, use that as batch size.
@@ -209,19 +380,60 @@ class IssueBatchImportService {
    */
   public static function batchOperation($config_id, $source_type, $project_id, $filter_tags, $status_filter, $date_filter, $offset, $limit, &$context) {
     $logger = \Drupal::service('logger.factory')->get('ai_dashboard');
-
-    // Initialize sandbox on first operation.
-    if (empty($context['sandbox'])) {
-      $context['sandbox']['progress'] = 0;
-      $context['sandbox']['total_processed'] = 0;
-      $context['sandbox']['current_operation'] = 0;
-      $context['results'] = [
-        'imported' => 0,
-        'skipped' => 0,
-        'errors' => 0,
-        'total_operations' => 0,
-      ];
+    /** @var ModuleImport $config */
+    $config = \Drupal::entityTypeManager()
+      ->getStorage('module_import')
+      ->load($config_id);
+    if (!$config) {
+      $context['results']['errors'][] = 'Configuration not found';
+      return;
     }
+
+    try {
+      $import_service = \Drupal::service('ai_dashboard.issue_import');
+      $results = $import_service->importFromApiBatch($config, $offset, $limit, reset($status_filter ?? []));
+
+      // Update context with results.
+      if (!isset($context['results']['imported'])) {
+        $context['results']['imported'] = 0;
+        $context['results']['updated'] = 0;
+        $context['results']['skipped'] = 0;
+        $context['results']['errors'] = 0;
+        $context['results']['total_operations'] = 0;
+      }
+
+      $context['results']['imported'] += $results['imported'];
+      $context['results']['updated'] += $results['updated'];
+      $context['results']['skipped'] += $results['skipped'];
+      $context['results']['errors'] += $results['errors'];
+      $context['results']['total_operations']++;
+
+      // Update progress tracking.
+      $context['sandbox']['current_operation']++;
+      $context['sandbox']['total_processed'] += $results['imported'] + $results['skipped'];
+
+      $context['message'] = t('Processed batch @current: @imported imported, @skipped skipped from offset @offset', [
+        '@current' => $context['sandbox']['current_operation'],
+        '@imported' => $results['imported'],
+        '@skipped' => $results['skipped'],
+        '@offset' => $offset,
+      ]);
+
+      $logger->info('Batch operation @current completed: @imported imported, @skipped skipped, @errors errors', [
+        '@current' => $context['sandbox']['current_operation'],
+        '@imported' => $results['imported'],
+        '@skipped' => $results['skipped'],
+        '@errors' => $results['errors'],
+      ]);
+
+      $context['finished'] = 1;
+    }
+    catch (\Exception $e) {
+      $logger->error('Batch operation failed: @message', ['@message' => $e->getMessage()]);
+      $context['results']['errors']++;
+      $context['finished'] = 1;
+    }
+  }
 
     try {
       // Load configuration.

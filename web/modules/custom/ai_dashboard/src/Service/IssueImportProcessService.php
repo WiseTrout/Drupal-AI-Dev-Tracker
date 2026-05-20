@@ -16,14 +16,9 @@ use GuzzleHttp\Exception\RequestException;
 /**
  * Service for importing issues from external APIs.
  */
-class IssueImportService {
+class IssueImportProcessService {
 
   const USER_AGENT = 'AI Dashboard Module/1.0';
-
-  /**
-   * Limit of per-page results using drupal.org REST API.
-   */
-  const BATCH_SIZE = 50;
 
   /**
    * Maximum number of tries before giving up.
@@ -196,22 +191,21 @@ class IssueImportService {
     try {
       $source_type = $config->getSourceType();
       $project_id = $this->resolveProjectId($config);
-      $max_issues = $this->getMaxIssues($config);
+      $max_issues = $this->getMaxIssues($config) ?? self::DEFAULT_MAX_ISSUES;
 
       $logger->info('Starting import from @source for project @project', [
         '@source' => $source_type,
         '@project' => $project_id,
       ]);
-
       // Use batch processing for large imports (over 100 issues)
       // and web requests.
-      // Force batch processing for multi-status imports from Drupal.org.
-
+      // Force batch processing for multi-status Drupal.org imports.
       $multi_status_drupal_org = $source_type === "drupal_org" && count($config->getStatusFilter()) > 1;
 
       if ($use_batch && ($multi_status_drupal_org || ($max_issues > 100 && PHP_SAPI !== 'cli'))) {
         $batch_service = \Drupal::service('ai_dashboard.batch_import');
-        return $batch_service->startBatchImport($config);
+        $api_details = $this->getSourceApiDetails($config);
+        return $batch_service->startBatchImport($config, $api_details['per_page_max']);
       }
 
       return $this->importFromApi($config);
@@ -328,9 +322,9 @@ class IssueImportService {
   /**
    * Batch process callback.
    */
-  public static function batchProcess($config_id, $source_type, $project_id, $filter_tags, $status_filter, $offset, $limit, $date_filter, &$context) {
+  public static function batchProcess($config, $offset, $limit, &$context) {
     $import_service = \Drupal::service('ai_dashboard.issue_import');
-    $config = \Drupal::entityTypeManager()->getStorage('node')->load($config_id);
+    // $config = \Drupal::entityTypeManager()->getStorage('node')->load($config_id);
 
     if (!$config) {
       $context['results']['errors'][] = 'Configuration not found';
@@ -587,21 +581,240 @@ class IssueImportService {
    * @return array
    *   Import results.
    */
+  /**
+   * Import from API.
+   *
+   * @param ModuleImport $config
+   *   The import configuration node.
+   * 
+   * @param $single_status
+   *  To be set when we want to only import issues with given status. This is used for DO imports where we cannot reliably import several statuses at a time.
+   *
+   * @return array
+   *   Import results.
+   *
+   */
+  /**
+   * Import from API.
+   *
+   * @param ModuleImport $config
+   *   The import configuration node.
+   * 
+   * @param $single_status
+   *  To be set when we want to only import issues with given status. This is used for DO imports where we cannot reliably import several statuses at a time.
+   *
+   * @return array
+   *   Import results.
+   *
+   */
   protected function importFromApi(ModuleImport $config, $single_status = NULL): array {
     $this->clearImportSessionCache();
     $logger = $this->loggerFactory->get('ai_dashboard');
     $source_type = $config->getSourceType();
-
     $do_status = $single_status;
 
     // Handle multiple status filters by processing each one separately
     // as drupal.org API doesn't support comma-separated status values reliably
     if ($source_type === "drupal_org" && !$do_status) {
         $status_filter = $config->getStatusFilter();
-          if($status_filter){
-            if (!is_array($status_filter)) {
-              $status_filter = explode(',', $status_filter);
+        if($status_filter){
+          if (!is_array($status_filter)) {
+            $status_filter = explode(',', $status_filter);
+          }
+          if(count($status_filter) > 1){
+            return $this->importMultipleStatusesFromDrupalOrg($config);
+          }else{
+            $do_status = reset($status_filter);
+          }
+        }
+    }
+
+    $max_issues = $this->getMaxIssues($config);
+    $api_details = $this->getSourceApiDetails($config);
+    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], ['single_status' => $do_status]);
+
+    try {
+      $results = [
+        'success' => TRUE,
+        'imported' => 0,
+        'updated' => 0,
+        'skipped' => 0,
+        'errors' => 0,
+        'message' => '',
+      ];
+
+      $page = 0;
+      $total_processed = 0;
+      $per_page_max = $api_details['per_page_max'] ?? self::BATCH_SIZE;
+
+      do {
+        $per_page = min($per_page_max, $max_issues - $total_processed);
+        $current_params = $this->getPaginationParams($source_type, $params, $per_page, $page);
+
+        $headers = ['User-Agent' => self::USER_AGENT];
+        if (isset($api_details['auth'])) {
+          $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
+        }
+
+        $response = $this->httpClient->request('GET', $api_details['url'], [
+          'query' => $current_params,
+          'timeout' => 60,
+          'headers' => $headers,
+        ]);
+
+        $response_body = json_decode($response->getBody()->getContents(), TRUE);
+        $issues_data = $this->deriveIssuesData($source_type, $response_body);
+
+        if (empty($issues_data)) {
+          $results['message'] = sprintf('Page %d: No more issues available', $page);
+          break;
+        }
+
+        $total_processed = 0;
+        foreach ($issues_data as $issue_data) {
+          if ($total_processed >= $per_page) { // Using per_page as limit for this chunk
+            break;
+          }
+
+          try {
+            $result = $this->processIssue($issue_data, $config);
+            if ($result === 'created') {
+              $results['imported']++;
+            } elseif ($result === 'updated') {
+              $results['updated']++;
+            } elseif ($result === 'skipped') {
+              $results['skipped']++;
             }
+            $total_processed++;
+          }
+          catch (\Exception $e) {
+            $logger->warning('Failed to process issue @id: @message', [
+              '@id' => $issue_data['nid'] ?? $issue_data['iid'] ?? 'unknown',
+              '@message' => $e->getMessage(),
+            ]);
+            $results['errors']++;
+            $total_processed++;
+          }
+        }
+
+        $results['message'] = sprintf(
+          'Page %d: %d imported, %d updated, %d skipped, %d errors',
+          $page,
+          $results['imported'],
+          $results['updated'],
+          $results['skipped'],
+          $results['errors']
+        );
+        $page++;
+      } while ($total_processed < $max_issues);
+
+      return $results;
+    }
+    catch (\Exception $e) {
+      $logger->error('API request failed: @message', ['@message' => $e->getMessage()]);
+      $results['success'] = FALSE;
+      $results['message'] = $e->getMessage();
+      return $results;
+    }
+  }
+
+          if(count($status_filter) > 1){
+            return $this->importMultipleStatusesFromDrupalOrg($config);
+          }else{
+            $do_status = reset($status_filter);
+          }
+        }
+    }
+
+    $max_issues = $this->getMaxIssues($config);
+    $api_details = $this->getSourceApiDetails($config);
+    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], ['single_status' => $do_status]);
+
+    try {
+      $results = [
+        'success' => TRUE,
+        'imported' => 0,
+        'updated' => 0,
+        'skipped' => 0,
+        'errors' => 0,
+        'message' => '',
+      ];
+
+      $page = 0;
+      $total_processed = 0;
+      $per_page_max = $api_details['per_page_max'] ?? self::BATCH_SIZE;
+
+      do {
+        $per_page = min($per_page_max, $max_issues - $total_processed);
+        $current_params = $this->getPaginationParams($source_type, $params, $per_page, $page);
+
+        $headers = ['User-Agent' => self::USER_AGENT];
+        if (isset($api_details['auth'])) {
+          $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
+        }
+
+        $response = $this->httpClient->request('GET', $api_details['url'], [
+          'query' => $current_params,
+          'timeout' => 60,
+          'headers' => $headers,
+        ]);
+
+        $response_body = json_decode($response->getBody()->getContents(), TRUE);
+        $issues_data = $this->deriveIssuesData($source_type, $response_body);
+
+        if (empty($issues_data)) {
+          $results['message'] = sprintf('Page %d: No more issues available', $page);
+          break;
+        }
+
+        $total_processed = 0;
+        foreach ($issues_data as $issue_data) {
+          if ($total_processed >= $limit) {
+            break;
+          }
+
+          try {
+            $result = $this->processIssue($issue_data, $config);
+            if ($result === 'created') {
+              $results['imported']++;
+            } elseif ($result === 'updated') {
+              $results['updated']++;
+            } elseif ($result === 'skipped') {
+              $results['skipped']++;
+            }
+            $total_processed++;
+          }
+          catch (\Exception $e) {
+            $logger->warning('Failed to process issue @id: @message', [
+              '@id' => $issue_data['nid'] ?? $issue_data['iid'] ?? 'unknown',
+              '@message' => $e->getMessage(),
+            ]);
+            $results['errors']++;
+            $total_processed++;
+          }
+        }
+
+        $results['message'] = sprintf(
+          'Page %d: %d imported, %d updated, %d skipped, %d errors',
+          $page,
+          $results['imported'],
+          $results['updated'],
+          $results['skipped'],
+          $results['errors']
+        );
+        $page++;
+      } while ($total_processed < $max_issues);
+
+      return $results;
+    }
+    catch (\Exception $e) {
+      $logger->error('API request failed: @message', ['@message' => $e->getMessage()]);
+      $results['success'] = FALSE;
+      $results['message'] = $e->getMessage();
+      return $results;
+    }
+  }
+
             if(count($status_filter) > 1){
               return $this->importMultipleStatusesFromDrupalOrg($config);
             }else{
@@ -2158,7 +2371,9 @@ class IssueImportService {
           'auth' => [
             'type' => 'Private-Token',
             'value' => $token,
-          ]
+          ],
+          // GitLab API limit
+          'per_page_max' => 100 
         ];
 
       default:
