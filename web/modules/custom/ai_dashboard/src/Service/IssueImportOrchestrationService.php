@@ -16,6 +16,10 @@ class IssueImportOrchestrationService {
 
   use StringTranslationTrait;
 
+  /**
+   * Default value for max issues, when none is set in config.
+   */
+
   const DEFAULT_MAX_ISSUES = 1000;
 
   /**
@@ -62,13 +66,110 @@ class IssueImportOrchestrationService {
     EntityTypeManagerInterface $entity_type_manager,
     LoggerChannelFactoryInterface $logger_factory,
     MessengerInterface $messenger,
-    IssueImportService $issue_import_service,
+    IssueImportProcessService $issue_process_service,
   ) {
     $this->entityTypeManager = $entity_type_manager;
     $this->loggerFactory = $logger_factory;
     $this->messenger = $messenger;
-    $this->issueImportService = $issue_import_service;
+    $this->issueProcessService = $issue_process_service;
   }
+
+
+  /**
+   * Import issues from configuration (wrapper method).
+   *
+   * @param ModuleImport $config
+   *   The import configuration.
+   *
+   * @return array
+   *   Array with success status and import results.
+   */
+  public function import(ModuleImport $config): array {
+    $result = $this->importFromConfig($config, TRUE);
+    
+    // Update last run timestamp in State API on successful start.
+    if ($result['success']) {
+      \Drupal::state()->set('ai_dashboard:last_import:' . $config->id(), \Drupal::time()->getRequestTime());
+    }
+    
+    return $result;
+  }
+
+    /**
+   * Build import batch.
+   *
+   * @param ModuleImport $config
+   *   The import configuration.
+   *
+   * @return array
+   *   Batch definition to process.
+   */
+  public function buildImportBatch(ModuleImport $config): array {
+
+    $batchBuilder = new BatchBuilder();
+
+    try {
+
+      $this->issueProcessService->applyToEachIssuesPage(function($issues_data){
+        $batchBuilder->addOperation(
+          [IssueBatchImportService::class, 'batchOperationProcessIssueBatch'],
+        [$issues_data, $config->id()]);
+      }, $config);
+
+      return $batchBuilder->toArray();
+    }
+    catch (\Exception $e) {
+      throw new \Exception($e->getMessage());
+    }
+  }
+
+
+   /**
+   * Import issues from a configuration.
+   *
+   * @param ModuleImport $config
+   *   The import configuration.
+   * @param bool $use_batch
+   *   Whether to use batch processing for large imports.
+   *
+   * @return array
+   *   Import results with counts and messages.
+   */
+  public function importFromConfig(ModuleImport $config, bool $use_batch = TRUE): array {
+    $logger = $this->loggerFactory->get('ai_dashboard');
+
+    try {
+      $source_type = $config->getSourceType();
+      $project_id = $this->resolveProjectId($config);
+      $max_issues = $config->getMaxIssues() ?? self::DEFAULT_MAX_ISSUES;
+
+      $logger->info('Starting import from @source for project @project', [
+        '@source' => $source_type,
+        '@project' => $project_id,
+      ]);
+      // Use batch processing for large imports (over 100 issues)
+      // and web requests.
+      // Force batch processing for multi-status Drupal.org imports.
+      $multi_status_drupal_org = $source_type === "drupal_org" && count($config->getStatusFilter()) > 1;
+
+      if ($use_batch && ($multi_status_drupal_org || ($max_issues > 100 && PHP_SAPI !== 'cli'))) {
+        return $this->startBatchImport($config);
+      }
+
+      return $this->issueProcessService->importFromApi($config, $max_issues);
+    }
+    catch (\Exception $e) {
+      $logger->error('Import failed: @message', ['@message' => $e->getMessage()]);
+      return [
+        'success' => FALSE,
+        'message' => 'Import failed: ' . $e->getMessage(),
+        'imported' => 0,
+        'skipped' => 0,
+        'errors' => 1,
+      ];
+    }
+  }
+
 
   /**
    * Start a batch import process.
@@ -86,13 +187,14 @@ class IssueImportOrchestrationService {
       // Extract configuration parameters.
       $source_type = $config->getSourceType();
       $project_id = $config->getProjectId();
-      $max_issues = $config->getMaxIssues();
-      $max_issues = $max_issues ? (int) $max_issues : 1000;
+      $max_issues = $config->getMaxIssues() ?? self::DEFAULT_MAX_ISSUES;
 
       // Get filter parameters.
       $filter_tags = $config->getFilterTags();
       $status_filter = $config->getStatusFilter();
       $date_filter = $config->getDateFilter();
+
+      $batch_size = $this->issueProcessService->getBatchSize($config);
 
       $logger->info('Starting batch import from @source for project @project with max @max issues', [
         '@source' => $source_type,
@@ -107,7 +209,7 @@ class IssueImportOrchestrationService {
         'progress_message' => $this->t('Processed @current out of @total operations.'),
         'error_message' => $this->t('Issue import has encountered an error.'),
         'finished' => [self::class, 'batchFinished'],
-        'file' => \Drupal::service('extension.list.module')->getPath('ai_dashboard') . '/src/Service/IssueBatchImportService.php',
+        'file' => \Drupal::service('extension.list.module')->getPath('ai_dashboard') . '/src/Service/IssueImportOrchestrationService.php',
       ];
 
       // STRATEGY 1: Multi-status Drupal.org import (multiple operations)
@@ -135,113 +237,27 @@ class IssueImportOrchestrationService {
       }
       // STRATEGY 2: Standard pagination-based import (for GitLab or single-status Drupal.org)
       else {
-        $api_details = $this->issueImportService->getSourceApiDetails($config);
-        $per_page_max = $api_details['per_page_max'] ?? 50;
-        $params = $this->issueImportService->getSourceSpecificFilters($config, $api_details['base_params']);
-        
-        $page = 0;
-        $total_processed = 0;
 
-          do {
-            $per_page = min($per_page_max, $max_issues - $total_processed);
-            if ($per_page <= 0) break;
+        $estimated_operations = ceil($max_issues / $batch_size);
 
-            $current_params = $this->issueImportService->getPaginationParams($source_type, $params, $per_page, $page);
-            
-            $batch['operations'][] = [
-              [self::class, 'batchOperation'],
-              [
-                $config->id(),
-                $source_type,
-                $project_id,
-                $filter_tags,
-                $status_filter,
-                $date_filter,
-                $total_processed, // This is the offset
-                $per_page,
-              ],
-            ];
+        for ($i = 0; $i < $estimated_operations; $i++) {
+          $offset = $i * $batch_size;
+          $limit = min($batch_size, $max_issues - $offset);
 
-            $page++;
-            $total_processed += $per_page;
+          if ($limit <= 0) {
+            // No more issues to process.
+            break;
+          }
 
-            if ($total_processed >= $max_issues) break;
-
-          } while ($total_processed < $max_issues);
-
-      }
-
-      batch_set($batch);
-
-      if (PHP_SAPI !== 'cli') {
-        \Drupal::state()->set('ai_dashboard.batch_start_time', time());
-        return [
-          'success' => TRUE,
-          'message' => $this->t('Batch import started.'),
-          'redirect' => TRUE,
-          'imported' => 0,
-          'skipped' => 0,
-          'errors' => 0,
-        ];
-      }
-
-      $batch =& batch_get();
-      $batch['progressive'] = FALSE;
-      batch_process();
-
-      return [
-        'success' => TRUE,
-        'message' => $this->t('Batch import completed via CLI.'),
-      ];
-    } catch (\Exception $e) {
-      $logger->error('Failed to start batch import: @message', ['@message' => $e->getMessage()]);
-      return [
-        'success' => FALSE,
-        'message' => $this->t('Failed to start batch import: @error', ['@error' => $e->getMessage()]),
-      ];
-    }
-  }
-      }
-      // STRATEGY 2: Standard pagination-based import (for GitLab or single-status Drupal.org)
-      else {
-        $api_details = $this->issueImportService->getSourceApiDetails($config);
-        $per_page_max = $api_details['per_page_max'] ?? 50;
-        $params = $this->issueImportService->getSourceSpecificFilters($config, $api_details['base_params']);
-        
-        $page = 0;
-        $total_processed = 0;
-
-        // We don't know the total number of issues upfront for GitLab, but we can estimate/loop.
-        // We follow the logic from IssueImportService::buildImportBatch
-        do {
-          $per_page = min($per_page_max, $max_issues - $total_processed);
-          if ($per_page <= 0) break;
-
-          $current_params = $this->issueImportService->getPaginationParams($source_type, $params, $per_page, $page);
-          
           $batch['operations'][] = [
             [self::class, 'batchOperation'],
             [
-              $config->id(),
-              $source_type,
-              $project_id,
-              $filter_tags,
-              $status_filter,
-              $date_filter,
-              $total_processed, // This is the offset
-              $per_page,
+              $config,
+              $offset,
+              $limit,
             ],
           ];
-
-          // We need to peek ahead or increment to build the batch. 
-          // Since we are building the list of operations, we increment page.
-          $page++;
-          $total_processed += $per_page;
-
-          // Safety break to prevent infinite loop in batch builder if API is weird
-          if ($total_processed >= $max_issues) break;
-
-        } while ($total_processed < $max_issues);
+        }
       }
 
       batch_set($batch);
@@ -275,86 +291,7 @@ class IssueImportOrchestrationService {
     }
   }
 
-      // Calculate total estimated operations based on API page size.
-      // drupal.org API returns max 50 issues per page, use that as batch size.
-      // Use API page size to avoid pagination conflicts.
-      $issues_per_batch = 50;
-      $estimated_operations = ceil($max_issues / $issues_per_batch);
-
-      // Build batch configuration.
-      $batch = [
-        'title' => $this->t('Importing Issues from @source', ['@source' => ucfirst($source_type)]),
-        'operations' => [],
-        'init_message' => $this->t('Initializing import of up to @max issues...', ['@max' => $max_issues]),
-        'progress_message' => $this->t('Processed @current out of @total operations.'),
-        'error_message' => $this->t('Issue import has encountered an error.'),
-        'finished' => [self::class, 'batchFinished'],
-        'file' => \Drupal::service('extension.list.module')->getPath('ai_dashboard') . '/src/Service/IssueBatchImportService.php',
-      ];
-
-      // Create batch operations.
-      for ($i = 0; $i < $estimated_operations; $i++) {
-        $offset = $i * $issues_per_batch;
-        $limit = min($issues_per_batch, $max_issues - $offset);
-
-        if ($limit <= 0) {
-          // No more issues to process.
-          break;
-        }
-
-        $batch['operations'][] = [
-          [self::class, 'batchOperation'],
-          [
-            $config->id(),
-            $source_type,
-            $project_id,
-            $filter_tags,
-            $status_filter,
-            $date_filter,
-            $offset,
-            $limit,
-          ],
-        ];
-      }
-
-      // Set the batch.
-      batch_set($batch);
-
-      // For web requests, batch processing should be handled by controller.
-      if (PHP_SAPI !== 'cli') {
-        // Store start time for reporting.
-        \Drupal::state()->set('ai_dashboard.batch_start_time', time());
-
-        // Return success with the redirect flag.
-        return [
-          'success' => TRUE,
-          'message' => $this->t('Batch import started with @count operations.', ['@count' => count($batch['operations'])]),
-          'redirect' => TRUE,
-          'imported' => 0,
-          'skipped' => 0,
-          'errors' => 0,
-        ];
-      }
-
-      // For CLI, process immediately.
-      $batch =& batch_get();
-      $batch['progressive'] = FALSE;
-      batch_process();
-
-      return [
-        'success' => TRUE,
-        'message' => $this->t('Batch import completed via CLI.'),
-      ];
-
-    }
-    catch (\Exception $e) {
-      $logger->error('Failed to start batch import: @message', ['@message' => $e->getMessage()]);
-      return [
-        'success' => FALSE,
-        'message' => $this->t('Failed to start batch import: @error', ['@error' => $e->getMessage()]),
-      ];
-    }
-  }
+  
 
   /**
    * Batch operation callback.
@@ -378,20 +315,23 @@ class IssueImportOrchestrationService {
    * @param array $context
    *   Batch context array.
    */
-  public static function batchOperation($config_id, $source_type, $project_id, $filter_tags, $status_filter, $date_filter, $offset, $limit, &$context) {
+  public static function batchOperation($config, $offset, $limit, &$context) {
     $logger = \Drupal::service('logger.factory')->get('ai_dashboard');
     /** @var ModuleImport $config */
-    $config = \Drupal::entityTypeManager()
-      ->getStorage('module_import')
-      ->load($config_id);
-    if (!$config) {
-      $context['results']['errors'][] = 'Configuration not found';
-      return;
-    }
+    // $config = \Drupal::entityTypeManager()
+    //   ->getStorage('module_import')
+    //   ->load($config_id);
+    // if (!$config) {
+    //   $context['results']['errors'][] = 'Configuration not found';
+    //   return;
+    // }
 
     try {
-      $import_service = \Drupal::service('ai_dashboard.issue_import');
-      $results = $import_service->importFromApiBatch($config, $offset, $limit, reset($status_filter ?? []));
+
+      $status_filter = $config->getStatusFilter();
+      $process_service = \Drupal::service('ai_dashboard.import_process');
+
+      $results = $process_service->importFromApiBatch($config, $offset, $limit, reset($status_filter ?? []));
 
       // Update context with results.
       if (!isset($context['results']['imported'])) {
@@ -435,75 +375,10 @@ class IssueImportOrchestrationService {
     }
   }
 
-    try {
-      // Load configuration.
-      $config = \Drupal::entityTypeManager()->getStorage('module_import')->load($config_id);
-      if (!$config) {
-        throw new \Exception('Configuration not found');
-      }
-
-      // Get import service.
-      $import_service = \Drupal::service('ai_dashboard.issue_import');
-
-      // Process this batch.
-      switch ($source_type) {
-        case 'drupal_org':
-          $results = $import_service->importFromDrupalOrgBatch(
-            $project_id,
-            $filter_tags,
-            $status_filter,
-            $offset,
-            $limit,
-            $date_filter,
-            $config
-          );
-          break;
-
-        default:
-          throw new \Exception("Batch import not supported for source type: {$source_type}");
-      }
-
-      // Update context with results.
-      $context['results']['imported'] += $results['imported'];
-      $context['results']['skipped'] += $results['skipped'];
-      $context['results']['errors'] += $results['errors'];
-      $context['results']['total_operations']++;
-
-      // Update progress tracking.
-      $context['sandbox']['current_operation']++;
-      $context['sandbox']['total_processed'] += $results['imported'] + $results['skipped'];
-
-      // Update user message.
-      $context['message'] = t('Processed batch @current: @imported imported, @skipped skipped from offset @offset', [
-        '@current' => $context['sandbox']['current_operation'],
-        '@imported' => $results['imported'],
-        '@skipped' => $results['skipped'],
-        '@offset' => $offset,
-      ]);
-
-      $logger->info('Batch operation @current completed: @imported imported, @skipped skipped, @errors errors', [
-        '@current' => $context['sandbox']['current_operation'],
-        '@imported' => $results['imported'],
-        '@skipped' => $results['skipped'],
-        '@errors' => $results['errors'],
-      ]);
-
-      // Mark this operation as finished.
-      $context['finished'] = 1;
-
-    }
-    catch (\Exception $e) {
-      $logger->error('Batch operation failed: @message', ['@message' => $e->getMessage()]);
-      $context['results']['errors']++;
-      // Continue to next operation even on error.
-      $context['finished'] = 1;
-    }
-  }
-
   /**
    * Batch operation callback for single status import.
    */
-  public static function batchOperationSingleStatus($config_id, $source_type, $project_id, $filter_tags, $status_filter, $date_filter, $status_name, $max_issues, &$context) {
+  public static function batchOperationSingleStatus($config, $offset,  $limit, $single_status, &$context) {
     $logger = \Drupal::service('logger.factory')->get('ai_dashboard');
 
     // Initialize sandbox on first operation.
@@ -518,24 +393,14 @@ class IssueImportOrchestrationService {
     }
 
     try {
-      // Load configuration.
-      $config = \Drupal::entityTypeManager()->getStorage('module_import')->load($config_id);
-      if (!$config) {
-        throw new \Exception('Configuration not found');
-      }
-
-      // Get import service and import this single status.
-      $import_service = \Drupal::service('ai_dashboard.issue_import');
+      
+      $process_service = \Drupal::service('ai_dashboard.import_process');
 
       // Import all issues for this single status.
-      $results = $import_service->importFromDrupalOrg(
-        $project_id,
-        $filter_tags,
-        // Single status array.
-        $status_filter,
-        $max_issues,
-        $date_filter,
-        $config
+      $results = $process_service->importFromApi(
+        $$config,
+        $limit,
+        $single_status,
       );
 
       // Update context with results.
@@ -635,95 +500,45 @@ class IssueImportOrchestrationService {
     }
   }
 
-  /**
-   * Create batch operations for multiple statuses separately.
+/**
+   * Batch process callback.
    */
-  protected function createMultiStatusBatch(ModuleImport $config, string $source_type, string $project_id, array $filter_tags, array $status_filter, ?string $date_filter, int $max_issues): array {
-    $status_names = [
-      '1' => 'Active',
-      '13' => 'Needs work',
-      '8' => 'Needs review',
-      '14' => 'RTBC',
-      '15' => 'Patch (to be ported)',
-      '2' => 'Fixed',
-      '4' => 'Postponed',
-      '16' => 'Postponed (maintainer needs more info)',
-    ];
+  public static function batchProcess($config, $offset, $limit, &$context) {
+    $import_service = \Drupal::service('ai_dashboard.issue_import');
+    // $config = \Drupal::entityTypeManager()->getStorage('node')->load($config_id);
 
-    // Build batch configuration for multi-status import.
-    $batch = [
-      'title' => $this->t('Importing Issues from @source (Multi-Status)', ['@source' => ucfirst($source_type)]),
-      'operations' => [],
-      'init_message' => $this->t('Initializing import of @count status types...', ['@count' => count($status_filter)]),
-      'progress_message' => $this->t('Processed @current out of @total status types.'),
-      'error_message' => $this->t('Multi-status issue import has encountered an error.'),
-      'finished' => [self::class, 'batchFinished'],
-      'file' => \Drupal::service('extension.list.module')->getPath('ai_dashboard') . '/src/Service/IssueBatchImportService.php',
-    ];
-
-    // Create one operation per status.
-    $batch['operations'][] = [
-      [self::class, 'batchOperationSingleStatus'],
-      [
-        $config->id(),
-        $source_type,
-        $project_id,
-        $filter_tags,
-        $status_filter,
-        $date_filter,
-        'All statuses',
-        $max_issues,
-      ],
-    ];
-
-    $status_filter = [];
-    foreach ($status_filter as $single_status) {
-      $status_name = $status_names[$single_status] ?? "Status $single_status";
-
-      $batch['operations'][] = [
-        [self::class, 'batchOperationSingleStatus'],
-        [
-          $config->id(),
-          $source_type,
-          $project_id,
-          $filter_tags,
-          [$single_status],
-          $date_filter,
-          $status_name,
-          $max_issues,
-        ],
-      ];
+    if (!$config) {
+      $context['results']['errors'][] = 'Configuration not found';
+      return;
     }
 
-    // Set the batch.
-    batch_set($batch);
+    try {
+          $results = $import_service->importFromApiBatch($config, $offset, $limit);
 
-    // For web requests, batch processing should be handled by controller.
-    if (PHP_SAPI !== 'cli') {
-      // Store start time for reporting.
-      \Drupal::state()->set('ai_dashboard.batch_start_time', time());
+      // Update context with results.
+      if (!isset($context['results']['imported'])) {
+        $context['results']['imported'] = 0;
+        $context['results']['updated'] = 0;
+        $context['results']['skipped'] = 0;
+        $context['results']['errors'] = 0;
+      }
 
-      // Return success with the redirect flag.
-      return [
-        'success' => TRUE,
-        'message' => $this->t('Multi-status batch import started with @count operations.', ['@count' => count($batch['operations'])]),
-        'redirect' => TRUE,
-        'imported' => 0,
-        'skipped' => 0,
-        'errors' => 0,
-      ];
+      $context['results']['imported'] += $results['imported'];
+      $context['results']['updated'] += $results['updated'];
+      $context['results']['skipped'] += $results['skipped'];
+      $context['results']['errors'] += $results['errors'];
+
+      $context['message'] = t('Processed @imported issues (offset @offset)', [
+        '@imported' => $results['imported'],
+        '@offset' => $offset,
+      ]);
+
     }
-
-    // For CLI, process immediately.
-    $batch =& batch_get();
-    $batch['progressive'] = FALSE;
-    drush_backend_batch_process();
-
-    return [
-      'success' => TRUE,
-      'message' => $this->t('Multi-status batch import completed via CLI.'),
-    ];
+    catch (\Exception $e) {
+      $context['results']['errors'][] = $e->getMessage();
+    }
   }
+
 
   /**
    * Get filter tags from configuration.
@@ -823,5 +638,98 @@ class IssueImportOrchestrationService {
       }
     }
   }
+
+  protected function resolveProjectId(ModuleImport $config): string {
+    // If project_id is set, use it (for backward compatibility).
+    if ($config->getProjectId()) {
+      return $config->getProjectId();
+    }
+
+    // Otherwise, resolve from machine name.
+    $machine_name = $config->getProjectMachineName();
+    if (empty($machine_name)) {
+      throw new \InvalidArgumentException('Either project_id or project machine name must be provided');
+    }
+
+    return $this->resolveProjectIdFromMachineName($machine_name);
+  }
+
+  /**
+   * Resolve project ID from machine name via drupal.org API.
+   *
+   * @param string $machine_name
+   *   The project machine name.
+   *
+   * @return string
+   *   The project ID.
+   */
+  protected function resolveProjectIdFromMachineName(string $machine_name): string {
+    // Static cache to avoid repeated API calls.
+    static $project_cache = [];
+
+    if (isset($project_cache[$machine_name])) {
+      return $project_cache[$machine_name];
+    }
+
+    // Try multiple project types commonly used on drupal.org.
+    // Some initiatives or non-module projects are not 'project_module'.
+    $project_types = [
+      'project_module',
+      'project_theme',
+      'project_distribution',
+      'project_core',
+      'project_profile',
+      'project_general',  // Used for recipes and other general projects.
+      // Fallback types (rare but included for resilience):
+      'project_theme_engine',
+      'project_translation',
+    ];
+
+    $last_error = NULL;
+    foreach ($project_types as $type) {
+      try {
+        $response = $this->httpClient->request('GET', 'https://www.drupal.org/api-d7/node.json', [
+          'query' => [
+            'type' => $type,
+            'field_project_machine_name' => $machine_name,
+            'limit' => 1,
+          ],
+          'timeout' => 10,
+          'headers' => [
+            'User-Agent' => self::USER_AGENT,
+          ],
+        ]);
+
+        if ($response->getStatusCode() !== 200) {
+          $last_error = "API request failed with status: " . $response->getStatusCode();
+          continue;
+        }
+
+        $data = json_decode($response->getBody()->getContents(), TRUE);
+        if (!empty($data['list'])) {
+          $project = reset($data['list']);
+          if (!empty($project['nid'])) {
+            $project_id = (string) $project['nid'];
+            $project_cache[$machine_name] = $project_id;
+            return $project_id;
+          }
+        }
+      }
+      catch (\Exception $e) {
+        $last_error = $e->getMessage();
+        // Try next type.
+        continue;
+      }
+    }
+
+    // Give a clear guidance if not found.
+    $hint = 'Ensure this is a drupal.org project with an issue queue. If it is not a module (e.g., an initiative), provide the numeric Project ID instead.';
+    $msg = "Failed to resolve project ID for machine name '{$machine_name}'. {$hint}";
+    if ($last_error) {
+      $msg .= ' Last error: ' . $last_error;
+    }
+    throw new \Exception($msg);
+  }
+
 
 }
