@@ -1,4 +1,4 @@
-Refacotring plan:
+Refactoring plan:
 
 
 Problems: 
