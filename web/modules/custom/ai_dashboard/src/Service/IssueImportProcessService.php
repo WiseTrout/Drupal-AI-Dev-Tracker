@@ -87,54 +87,32 @@ class IssueImportProcessService {
     $this->metadataParserService = $metadata_parser_service;
   }
 
-  public function applyToEachIssuesPage(function $cb, ModuleImport $config){
+  public function loadPageOfIssues(ModuleImport $config, int $per_page, int $page){
+
     $api_details = $this->getSourceApiDetails($config);
     $params = $this->getSourceSpecificFilters($config, $api_details['base_params']);
-    $max_issues = $this->getMaxIssues($config);
     $source_type = $config->getSourceType();
     $url = $api_details['url'];
 
-    try {
+    $current_params = $this->getPaginationParams($source_type, $params, $per_page, $page);
 
-      $page = 0;
-      $per_page_max = $api_details['per_page_max'];
-      $total_processed = 0;
-
-      do {
-        $per_page = min($per_page_max, $max_issues - $total_processed);
-        if($per_page <=0) break;
-        $current_params = $this->getPaginationParams($source_type, $params, $per_page, $page);
-
-        $headers = ['User-Agent' => self::USER_AGENT];
-        if (isset($api_details['auth'])) {
-          $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
-        }
-
-        $response = $this->httpClient->request('GET', $url, [
-          'query' => $current_params,
-          // Increased timeout for large imports.
-          'timeout' => 60,
-          'headers' => $headers,
-        ]);
-
-        $response_body = json_decode($response->getBody()->getContents(), TRUE);
-        $issues_data = $this->deriveIssuesData($source_type, $response_body);
-
-        if (empty($issues_data)) {
-          break;
-        }
-
-        $page_issues = count($issues_data);
-        $total_processed += $page_issues;
-        $cb($issues_data);
-        $page++;
-      } while ($page_issues >= $per_page_max && $total_processed < $max_issues);
-
-      return $batchBuilder->toArray();
+    $headers = ['User-Agent' => self::USER_AGENT];
+    if (isset($api_details['auth'])) {
+      $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
     }
-    catch (\Exception $e) {
-      throw new \Exception("Failed to fetch data from {$source_type}: " . $e->getMessage());
-    }
+
+    $response = $this->httpClient->request('GET', $url, [
+      'query' => $current_params,
+      // Increased timeout for large imports.
+      'timeout' => 60,
+      'headers' => $headers,
+    ]);
+
+    $response_body = json_decode($response->getBody()->getContents(), TRUE);
+    $issues_data = $this->deriveIssuesData($source_type, $response_body);
+
+    return $issues_data;
+
   }
 
   public function paginateAndDo(function $cb, ModuleImport $config, int $max_issues){

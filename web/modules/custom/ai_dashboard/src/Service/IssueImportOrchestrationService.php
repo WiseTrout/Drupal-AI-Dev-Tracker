@@ -108,18 +108,39 @@ class IssueImportOrchestrationService {
 
     $batchBuilder = new BatchBuilder();
 
+    $max_issues = $config->getMaxIssues() ?? self::DEFAULT_MAX_ISSUES;
+
+
     try {
 
-      $this->issueProcessService->applyToEachIssuesPage(function($issues_data){
+      $page = 0;
+      $per_page_max = $this->issueProcessService->getBatchSize($config);
+      $total_processed = 0;
+
+      do {
+        $per_page = min($per_page_max, $max_issues - $total_processed);
+        if($per_page <=0) break;
+
+        $issues_data = $this->iissueProcessService->loadPageOfIssues($config, $per_page, $page);
+
+        if (empty($issues_data)) {
+          break;
+        }
+
+        $page_issues = count($issues_data);
+        $total_processed += $page_issues;
+
         $batchBuilder->addOperation(
-          [IssueBatchImportService::class, 'batchOperationProcessIssueBatch'],
+          [IssueOrchestrationService::class, 'batchOperationProcessIssueBatch'],
         [$issues_data, $config->id()]);
-      }, $config);
+        $page++;
+      } while ($page_issues >= $per_page_max && $total_processed < $max_issues);
 
       return $batchBuilder->toArray();
     }
     catch (\Exception $e) {
-      throw new \Exception($e->getMessage());
+      $source_type = $config->getSourceType();
+      throw new \Exception("Failed to fetch data from {$source_type}: " . $e->getMessage());
     }
   }
 
