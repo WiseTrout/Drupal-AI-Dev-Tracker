@@ -248,7 +248,7 @@ class IssueImportOrchestrationService {
           $batch['operations'][] = [
             [self::class, 'batchOperationSingleStatus'],
             [
-              $config,
+              $config->id(),
               // Offset.
               $i * $batch_size,
               // Limit.
@@ -277,7 +277,7 @@ class IssueImportOrchestrationService {
           $batch['operations'][] = [
             [self::class, 'batchOperation'],
             [
-              $config,
+              $config->id(),
               $offset,
               $limit,
             ],
@@ -340,23 +340,33 @@ class IssueImportOrchestrationService {
    * @param array $context
    *   Batch context array.
    */
-  public static function batchOperation($config, $offset, $limit, &$context) {
+  public static function batchOperation($config_id, $offset, $limit, &$context) {
     $logger = \Drupal::service('logger.factory')->get('ai_dashboard');
     /** @var ModuleImport $config */
-    // $config = \Drupal::entityTypeManager()
-    //   ->getStorage('module_import')
-    //   ->load($config_id);
-    // if (!$config) {
-    //   $context['results']['errors'][] = 'Configuration not found';
-    //   return;
-    // }
+    $config = \Drupal::entityTypeManager()
+      ->getStorage('module_import')
+      ->load($config_id);
+    if (!$config) {
+      $context['results']['errors'][] = 'Configuration not found';
+      return;
+    }
 
     try {
 
       $status_filter = $config->getStatusFilter();
-      $process_service = \Drupal::service('ai_dashboard.import_process');
+      $process_service = \Drupal::service('ai_dashboard.issue_import_process');
 
-      $results = $process_service->importFromApiBatch($config, $offset, $limit, reset($status_filter ?? []));
+      $source_type = $config->getSourceType();
+
+      if ($source_type === 'drupal_org') {
+        // $status_filter is either empty or has only once status (multi-status DO issues are handled by batchOperationSingleStatus)
+        $single_status = reset($status_filter ?? []);
+        $results = $process_service->importFromApiBatch($config, $offset, $limit, $single_status);
+      } else {
+        $results = $process_service->importFromApiBatch($config, $offset, $limit);
+      }
+
+      
 
       // Update context with results.
       if (!isset($context['results']['imported'])) {
@@ -403,8 +413,16 @@ class IssueImportOrchestrationService {
   /**
    * Batch operation callback for single status import.
    */
-  public static function batchOperationSingleStatus($config, $offset,  $limit, $single_status, &$context) {
+  public static function batchOperationSingleStatus($config_id, $offset, $limit, $single_status, &$context) {
     $logger = \Drupal::service('logger.factory')->get('ai_dashboard');
+    
+    $config = \Drupal::entityTypeManager()
+      ->getStorage('module_import')
+      ->load($config_id);
+    if (!$config) {
+      $context['results']['errors'][] = 'Configuration not found';
+      return;
+    }
 
     // Initialize sandbox on first operation.
     if (empty($context['sandbox'])) {
@@ -419,7 +437,7 @@ class IssueImportOrchestrationService {
 
     try {
       
-      $process_service = \Drupal::service('ai_dashboard.import_process');
+      $process_service = \Drupal::service('ai_dashboard.issue_import_process');
 
       // Import all issues for this single status.
       $results = $process_service->importFromApi(
@@ -528,9 +546,9 @@ class IssueImportOrchestrationService {
 /**
    * Batch process callback.
    */
-  public static function batchProcess($config, $offset, $limit, &$context) {
-    $import_service = \Drupal::service('ai_dashboard.issue_import');
-    // $config = \Drupal::entityTypeManager()->getStorage('node')->load($config_id);
+  public static function batchProcess($config_id, $offset, $limit, &$context) {
+    $import_service = \Drupal::service('ai_dashboard.issue_import_process');
+    $config = \Drupal::entityTypeManager()->getStorage('node')->load($config_id);
 
     if (!$config) {
       $context['results']['errors'][] = 'Configuration not found';
@@ -683,11 +701,11 @@ class IssueImportOrchestrationService {
     }
 
     // Get import service and import this single status.
-    /** @var IssueImportService $import_service */
-    $import_service = \Drupal::service('ai_dashboard.issue_import');
+    /** @var IssueImportProcessService $import_service */
+    $import_service = \Drupal::service('ai_dashboard.issue_import_process');
     foreach ($issues as $issue) {
       try {
-        $import_service->processIssue($issue, $sourceType, $config);
+        $import_service->processIssue($issue, $config);
       }
       catch (\Exception $e) {
         $logger->error($e->getMessage());
