@@ -87,10 +87,10 @@ class IssueImportProcessService {
     $this->metadataParserService = $metadata_parser_service;
   }
 
-  public function loadPageOfIssues(ModuleImport $config, int $per_page, int $page){
+  public function loadPageOfIssues(ModuleImport $config, int $per_page, int $page, $single_status = NULL){
 
     $api_details = $this->getSourceApiDetails($config);
-    $params = $this->getSourceSpecificFilters($config, $api_details['base_params']);
+    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], ['single_status' => $single_status]);
     $source_type = $config->getSourceType();
     $url = $api_details['url'];
 
@@ -115,64 +115,12 @@ class IssueImportProcessService {
 
   }
 
-  public function paginateAndDo(function $cb, ModuleImport $config, int $max_issues){
-
-    $api_details = $this->getSourceApiDetails($config);
-    $params = $this->getSourceSpecificFilters($config, $api_details['base_params']);
-    $max_issues = $this->getMaxIssues($config);
-    $source_type = $config->getSourceType();
-    $url = $api_details['url'];
-
-    try {
-
-      $page = 0;
-      $per_page_max = $api_details['per_page_max'];
-      $total_processed = 0;
-
-      do {
-        $per_page = min($per_page_max, $max_issues - $total_processed);
-        if($per_page <=0) break;
-        $current_params = $this->getPaginationParams($source_type, $params, $per_page, $page);
-
-        $headers = ['User-Agent' => self::USER_AGENT];
-        if (isset($api_details['auth'])) {
-          $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
-        }
-
-        $response = $this->httpClient->request('GET', $url, [
-          'query' => $current_params,
-          // Increased timeout for large imports.
-          'timeout' => 60,
-          'headers' => $headers,
-        ]);
-
-        $response_body = json_decode($response->getBody()->getContents(), TRUE);
-        $issues_data = $this->deriveIssuesData($source_type, $response_body);
-
-        if (empty($issues_data)) {
-          break;
-        }
-
-        $page_issues = count($issues_data);
-        $total_processed += $page_issues;
-        $cb($issues_data);
-        $page++;
-      } while ($page_issues >= $per_page_max && $total_processed < $max_issues);
-
-      return $batchBuilder->toArray();
-    }
-    catch (\Exception $e) {
-      throw new \Exception("Failed to fetch data from {$source_type}: " . $e->getMessage());
-    }
-  }
-
   /**
    * Import multiple status filters separately to ensure all issues are captured.
    */
-  protected function importMultipleStatusesFromDrupalOrg(ModuleImport $config): array {
+  protected function importMultipleStatusesFromDrupalOrg(ModuleImport $config, int $max_issues): array {
     $logger = $this->loggerFactory->get('ai_dashboard');
 
-    $max_issues = $this->getMaxIssues($config);
     $status_filter = $config->getStatusFilter();
 
     $combined_results = [
@@ -205,7 +153,7 @@ class IssueImportProcessService {
 
       try {
         // Import this single status with proportional limit.
-        $single_results = $this->importFromApi($config, $single_status);
+        $single_results = $this->importFromApi($config, $max_issues, $single_status);
 
         // Combine results.
         $combined_results['imported'] += $single_results['imported'];
@@ -252,9 +200,9 @@ class IssueImportProcessService {
     }
 
     $logger = $this->loggerFactory->get('ai_dashboard');
-    $source_type = $config->getSourceType();
-    $api_details = $this->getSourceApiDetails($config);
-    $per_page_max = $api_details['per_page_max'];
+
+
+    $per_page_max = $this->getBatchSize($config);
     $page_number = floor($offset / $per_page_max);
 
     $results = [
@@ -266,23 +214,11 @@ class IssueImportProcessService {
       'message' => '',
     ];
 
-    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], ['single_status' => $single_status]);
-    $params = $this->getPaginationParams($source_type, $params, min($per_page_max, $limit), $page_number);
-
-    $headers = ['User-Agent' => self::USER_AGENT];
-    if (isset($api_details['auth'])) {
-      $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
-    }
-
     try {
-      $response = $this->httpClient->request('GET', $api_details['url'], [
-        'query' => $params,
-        'timeout' => 60,
-        'headers' => $headers,
-      ]);
 
-      $response_body = json_decode($response->getBody()->getContents(), TRUE);
-      $issues_data = $this->deriveIssuesData($source_type, $response_body);
+      $per_page = min($per_page_max, $limit);
+
+      $issues_data = $this->loadPageOfIssues($config, $per_page, $page_number, $single_status);
 
       if (empty($issues_data)) {
         $results['message'] = sprintf('Page %d: No more issues available', $page_number);
@@ -362,22 +298,23 @@ class IssueImportProcessService {
     $logger = $this->loggerFactory->get('ai_dashboard');
     $source_type = $config->getSourceType();
 
-
     $do_status = $single_status;
 
-    // No need to handle multi-status DO imports - this case is handled by IssueImportOrchestrationService
-    if ($source_type === "drupal_org" && !$do_status) {
-        $status_filter = $config->getStatusFilter();
-        if($status_filter){
-          if (!is_array($status_filter)) {
-            $status_filter = explode(',', $status_filter);
-          }
-            $do_status = reset($status_filter);
+    // For Drupal org imports, import each status separately if there are multiple
+    if($source_type === "drupal_org" && !$single_status){
+      $status_filter = $config->getStatusFilter();
+      if($status_filter){
+        if(!is_array($status_filter)){
+          $status_filter = explode(',', $status_filter);
         }
+        if(count($status_filter) > 1) {
+          return $this->importMultipleStatusesFromDrupalOrg($config, $max_issues); 
+        } else {
+          $do_status = reset($status_filter);
+        }
+      }
     }
 
-    $api_details = $this->getSourceApiDetails($config);
-    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], ['single_status' => $do_status]);
 
     try {
       $results = [
@@ -391,25 +328,14 @@ class IssueImportProcessService {
 
       $page = 0;
       $total_processed = 0;
-      $per_page_max = $api_details['per_page_max'];
+      $per_page_max = $this->getBatchSize($config);
 
       do {
+
+
         $per_page = min($per_page_max, $max_issues - $total_processed);
-        $current_params = $this->getPaginationParams($source_type, $params, $per_page, $page);
-
-        $headers = ['User-Agent' => self::USER_AGENT];
-        if (isset($api_details['auth'])) {
-          $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
-        }
-
-        $response = $this->httpClient->request('GET', $api_details['url'], [
-          'query' => $current_params,
-          'timeout' => 60,
-          'headers' => $headers,
-        ]);
-
-        $response_body = json_decode($response->getBody()->getContents(), TRUE);
-        $issues_data = $this->deriveIssuesData($source_type, $response_body);
+       
+        $issues_data = $this->loadPageOfIssues($config, $per_page, $page, $single_status);
 
         if (empty($issues_data)) {
           $results['message'] = sprintf('Page %d: No more issues available', $page);
@@ -917,18 +843,6 @@ class IssueImportProcessService {
   }
 
   /**
-   * Check if issue matches status filter.
-   */
-  protected function issueMatchesStatusFilter(array $issue_data, array $status_filter): bool {
-    if (empty($status_filter)) {
-      return TRUE;
-    }
-
-    $issue_status = $issue_data['field_issue_status'] ?? '';
-    return in_array($issue_status, $status_filter);
-  }
-
-  /**
    * Resolve a drupal.org user ID to username via API.
    *
    * @param string $user_id
@@ -941,7 +855,7 @@ class IssueImportProcessService {
     // Validate user ID format.
     if (empty($user_id) || !is_numeric($user_id)) {
       return [];
-  }
+    }
 
     $result = $this->requestWithRetry('GET',
       "https://www.drupal.org/api-d7/user/{$user_id}.json");

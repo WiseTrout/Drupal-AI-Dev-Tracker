@@ -121,7 +121,7 @@ class IssueImportOrchestrationService {
         $per_page = min($per_page_max, $max_issues - $total_processed);
         if($per_page <=0) break;
 
-        $issues_data = $this->iissueProcessService->loadPageOfIssues($config, $per_page, $page);
+        $issues_data = $this->issueProcessService->loadPageOfIssues($config, $per_page, $page);
 
         if (empty($issues_data)) {
           break;
@@ -558,44 +558,6 @@ class IssueImportOrchestrationService {
     catch (\Exception $e) {
       $context['results']['errors'][] = $e->getMessage();
     }
-  }
-
-
-  /**
-   * Get filter tags from configuration.
-   */
-  protected function getFilterTags(Node $config): array {
-    $tags = [];
-    if ($config->hasField('field_import_filter_tags') && !$config->get('field_import_filter_tags')->isEmpty()) {
-      $tags_string = $config->get('field_import_filter_tags')->value;
-      if (!empty($tags_string)) {
-        $tags = array_map('trim', explode(',', $tags_string));
-        $tags = array_filter($tags, function ($tag) {
-          return !empty($tag);
-        });
-      }
-    }
-    return $tags;
-  }
-
-  /**
-   * Get status filter from configuration.
-   */
-  protected function getStatusFilter(Node $config): array {
-    $statuses = [];
-    if ($config->hasField('field_import_status_filter') && !$config->get('field_import_status_filter')->isEmpty()) {
-      foreach ($config->get('field_import_status_filter') as $item) {
-        if (!empty($item->value)) {
-          if ($item->value === 'all_open') {
-            // Return statuses that match drupal.org's combined "open" filter
-            // including "postponed" status.
-            return ['1', '13', '8', '14', '15', '2', '4', '16'];
-          }
-          $statuses[] = $item->value;
-        }
-      }
-    }
-    return $statuses;
   }
 
   /**
