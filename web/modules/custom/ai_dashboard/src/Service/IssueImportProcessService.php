@@ -116,81 +116,6 @@ class IssueImportProcessService {
   }
 
   /**
-   * Import multiple status filters separately to ensure all issues are captured.
-   */
-  protected function importMultipleStatusesFromDrupalOrg(ModuleImport $config, int $max_issues): array {
-    $logger = $this->loggerFactory->get('ai_dashboard');
-
-    $status_filter = $config->getStatusFilter();
-
-    $combined_results = [
-      'success' => TRUE,
-      'imported' => 0,
-      'updated' => 0,
-      'skipped' => 0,
-      'errors' => 0,
-      'message' => '',
-    ];
-
-    $status_names = [
-      '1' => 'Active',
-      '13' => 'Needs work',
-      '8' => 'Needs review',
-      '14' => 'RTBC',
-      '15' => 'Patch (to be ported)',
-      '2' => 'Fixed',
-      '4' => 'Postponed',
-      '16' => 'Postponed (maintainer needs more info)',
-    ];
-
-    $status_results = [];
-    $issues_per_status = max(1, floor($max_issues / count($status_filter)));
-
-    // Import each status separately.
-    foreach ($status_filter as $single_status) {
-      $status_name = $status_names[$single_status] ?? "Status $single_status";
-      $logger->info('Importing @status issues', ['@status' => $status_name]);
-
-      try {
-        // Import this single status with proportional limit.
-        $single_results = $this->importFromApi($config, $max_issues, $single_status);
-
-        // Combine results.
-        $combined_results['imported'] += $single_results['imported'];
-        $combined_results['updated'] += $single_results['updated'];
-        $combined_results['skipped'] += $single_results['skipped'];
-        $combined_results['errors'] += $single_results['errors'];
-
-        $status_results[] = "$status_name: {$single_results['imported']} imported, {$single_results['updated']} updated";
-
-        if (!$single_results['success']) {
-          $combined_results['success'] = FALSE;
-        }
-
-      }
-      catch (\Exception $e) {
-        $logger->error('Failed to import @status: @message', [
-          '@status' => $status_name,
-          '@message' => $e->getMessage(),
-        ]);
-        $combined_results['errors']++;
-        $combined_results['success'] = FALSE;
-        $status_results[] = "$status_name: ERROR";
-      }
-    }
-
-    $combined_results['message'] = sprintf(
-      'Multi-status import completed: %d imported, %d updated, %d skipped (%s)',
-      $combined_results['imported'],
-      $combined_results['updated'],
-      $combined_results['skipped'],
-      implode(', ', $status_results)
-    );
-
-    return $combined_results;
-  }
-
-  /**
    * Import issues from API for batch processing.
    */
   public function importFromApiBatch(ModuleImport $config, int $offset, int $limit, $single_status = NULL): array {
@@ -300,19 +225,15 @@ class IssueImportProcessService {
 
     $do_status = $single_status;
 
-    // For Drupal org imports, import each status separately if there are multiple
-    if($source_type === "drupal_org" && !$single_status){
-      $status_filter = $config->getStatusFilter();
-      if($status_filter){
-        if(!is_array($status_filter)){
-          $status_filter = explode(',', $status_filter);
+    // No need to handle multi-status DO imports - this case is handled by IssueImportOrchestrationService
+    if ($source_type === "drupal_org" && !$do_status) {
+        $status_filter = $config->getStatusFilter();
+        if($status_filter){
+          if (!is_array($status_filter)) {
+            $status_filter = explode(',', $status_filter);
+          }
+            $do_status = reset($status_filter);
         }
-        if(count($status_filter) > 1) {
-          return $this->importMultipleStatusesFromDrupalOrg($config, $max_issues); 
-        } else {
-          $do_status = reset($status_filter);
-        }
-      }
     }
 
 
@@ -1941,10 +1862,6 @@ class IssueImportProcessService {
         default:
           throw new \InvalidArgumentException("Unsupported source type: {$source_type}");
       }
-    }
-
-    protected function getMaxIssues($config){
-      return $config->getMaxIssues ?? self::DEFAULT_MAX_ISSUES;
     }
 
 }
