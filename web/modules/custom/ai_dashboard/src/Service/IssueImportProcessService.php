@@ -322,8 +322,7 @@ class IssueImportProcessService {
    */
   public function processIssue(array $issue_data, ModuleImport $config): string {
     // Map API data to Drupal fields based on source.
-    $source_type = $config->getSourceType();
-    $mapped_data = $this->mapIssueData($issue_data, $source_type, $config);
+    $mapped_data = $this->mapIssueData($issue_data, $config);
 
     // Check for existing issue by external ID.
     $existing = $this->findExistingIssue($mapped_data);
@@ -359,7 +358,8 @@ class IssueImportProcessService {
    * @return array
    *   Mapped data.
    */
-  protected function mapIssueData(array $issue_data, string $source_type, ModuleImport $config): array {
+  protected function mapIssueData(array $issue_data, ModuleImport $config): array {
+    $source_type = $config->getSourceType();
     switch ($source_type) {
       case 'drupal_org':
         return $this->mapDrupalOrgIssue($issue_data, $config);
