@@ -287,8 +287,13 @@ class IssueImportOrchestrationService {
 
       batch_set($batch);
 
+      // For web requests, redirect to batch processing page.
       if (PHP_SAPI !== 'cli') {
+        // Store a flag so we know batch was started.
         \Drupal::state()->set('ai_dashboard.batch_start_time', time());
+
+        // Use batch_process() to redirect to the batch page.
+        $response = batch_process('/ai-dashboard/admin');
         return [
           'success' => TRUE,
           'message' => $this->t('Batch import started.'),
@@ -299,6 +304,7 @@ class IssueImportOrchestrationService {
         ];
       }
 
+      // For CLI/drush execution, process immediately.
       $batch =& batch_get();
       $batch['progressive'] = FALSE;
       batch_process();
@@ -306,6 +312,10 @@ class IssueImportOrchestrationService {
       return [
         'success' => TRUE,
         'message' => $this->t('Batch import completed via CLI.'),
+        // Will be updated by batch.
+        'imported' => 0,
+        'skipped' => 0,
+        'errors' => 0,
       ];
     } catch (\Exception $e) {
       $logger->error('Failed to start batch import: @message', ['@message' => $e->getMessage()]);
@@ -556,7 +566,7 @@ class IssueImportOrchestrationService {
     }
 
     try {
-          $results = $import_service->importFromApiBatch($config, $offset, $limit);
+      $results = $import_service->importFromApiBatch($config, $offset, $limit);
 
       // Update context with results.
       if (!isset($context['results']['imported'])) {
