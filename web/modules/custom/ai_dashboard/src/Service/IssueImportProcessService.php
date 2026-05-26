@@ -63,7 +63,7 @@ class IssueImportProcessService {
   protected $metadataParserService;
 
   /**
-   * Constructs a new IssueImportService object.
+   * Constructs a new IssueImportProcessService object.
    *
    * @param \Drupal\Core\Entity\EntityTypeManagerInterface $entity_type_manager
    *   The entity type manager.

@@ -46,12 +46,12 @@ class IssueImportOrchestrationService {
   /**
    * The issue import service.
    *
-   * @var \Drupal\ai_dashboard\Service\IssueImportService
+   * @var \Drupal\ai_dashboard\Service\IssueImportProcessService
    */
-  protected $issueImportService;
+  protected $issueProcessService;
 
   /**
-   * Constructs a new IssueBatchImportService object.
+   * Constructs a new IssueImportOrchestrationService object.
    *
    * @param \Drupal\Core\Entity\EntityTypeManagerInterface $entity_type_manager
    *   The entity type manager.
@@ -59,7 +59,7 @@ class IssueImportOrchestrationService {
    *   The logger factory.
    * @param \Drupal\Core\Messenger\MessengerInterface $messenger
    *   The messenger service.
-   * @param \Drupal\ai_dashboard\Service\IssueImportService $issue_import_service
+   * @param \Drupal\ai_dashboard\Service\IssueImportProcessService $issue_process_service
    *   The issue import service.
    */
   public function __construct(
