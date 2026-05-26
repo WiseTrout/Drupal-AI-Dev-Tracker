@@ -87,10 +87,10 @@ class IssueImportProcessService {
     $this->metadataParserService = $metadata_parser_service;
   }
 
-  public function loadPageOfIssues(ModuleImport $config, int $per_page, int $page, $single_status = NULL){
+  public function loadPageOfIssues(ModuleImport $config, int $per_page, int $page, $extra_options = NULL){
 
     $api_details = $this->getSourceApiDetails($config);
-    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], ['single_status' => $single_status]);
+    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], $extra_options);
     $source_type = $config->getSourceType();
     $url = $api_details['url'];
 
@@ -143,7 +143,7 @@ class IssueImportProcessService {
 
       $per_page = min($per_page_max, $limit);
 
-      $issues_data = $this->loadPageOfIssues($config, $per_page, $page_number, $single_status);
+      $issues_data = $this->loadPageOfIssues($config, $per_page, $page_number, ['single_status' => $single_status]);
 
       if (empty($issues_data)) {
         $results['message'] = sprintf('Page %d: No more issues available', $page_number);
@@ -256,7 +256,7 @@ class IssueImportProcessService {
 
         $per_page = min($per_page_max, $max_issues - $total_processed);
        
-        $issues_data = $this->loadPageOfIssues($config, $per_page, $page, $single_status);
+        $issues_data = $this->loadPageOfIssues($config, $per_page, $page, ["single_status" => $single_status]);
 
         if (empty($issues_data)) {
           $results['message'] = sprintf('Page %d: No more issues available', $page);
@@ -1452,7 +1452,7 @@ class IssueImportProcessService {
    * @param int $timestamp
    *
    * @return array
-   *   Array if issue data chunks, up to 50 items in a chunk.
+   *   Array of issue data chunks, up to 50 items in a chunk.
    */
   public function getModuleIssuesSince(ModuleImport $config, int $timestamp) : array {
     $status_filter = $config->getStatusFilter();
@@ -1460,96 +1460,63 @@ class IssueImportProcessService {
       return [];
     }
 
-    // If multiple statuses, process each one separately like the UI import does
-    if (count($status_filter) > 1) {
-      return $this->getModuleIssuesForMultipleStatuses($config, $timestamp, $status_filter);
+    $source_type = $config->getSourceType();
+
+
+    if ($source_type === "drupal_org") {
+      if (count($status_filter) > 1 ) {
+        $all_chunks = [];
+        foreach($status_filter as $single_status){
+          $status_chunk = $this->getIssuesSince($config, $timestamp, ["single_status" => $single_status]);
+          $all_chunks = array_merge($all_chunks, $status_chunks);
+        }
+        return $all_chunks;
+      } else {
+        return $this->getIssuesSince($config, $timestamp, ["single_status" => $status_filter[0]]);
+      }
     }
 
-    // Single status - use original logic
-    return $this->getModuleIssuesForSingleStatus($config, $timestamp, $status_filter[0]);
+
+    return $this->getIssuesSince($config, $timestamp);
+
   }
 
-  /**
-   * Get module issues for multiple statuses (like UI import does).
-   */
-  protected function getModuleIssuesForMultipleStatuses(ModuleImport $config, int $timestamp, array $status_filter): array {
-    $all_chunks = [];
-    
-    // Process each status separately to match UI behavior
-    foreach ($status_filter as $single_status) {
-      $status_chunks = $this->getModuleIssuesForSingleStatus($config, $timestamp, $single_status);
-      $all_chunks = array_merge($all_chunks, $status_chunks);
-    }
-    
-    return $all_chunks;
-  }
-
-  /**
-   * Get module issues for a single status.
-   */
-  protected function getModuleIssuesForSingleStatus(ModuleImport $config, int $timestamp, string $status): array {
-    // Build the API URL for single status import.
-    $url = 'https://www.drupal.org/api-d7/node.json';
-    $params = [
-      'type' => 'project_issue',
-      'field_project' => $config->getProjectId(),
-      'sort' => 'changed',
-      'direction' => 'DESC',
-      'limit' => self::BATCH_SIZE,
-      'field_issue_status' => $status,
-    ];
-
-    // Apply component filter if set.
-    $component = $config->getFilterComponent();
-    if (!empty($component)) {
-      $params['field_issue_component'] = $component;
-    }
-
+  protected function getIssuesSince(ModuleImport $config, int $timestamp, $extra_options) : array {
     $page = 0;
     $chunks = [];
-    $lastPage = 0;
+    $per_page = $this->getBatchSize($config);
+    $page_issues_count = $per_page;
+
+    $api_details = $this->getSourceApiDetails($config);
+    $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], $extra_options);
+    $source_type = $config->getSourceType();
+    $url = $api_details['url'];
+
+    $headers = ['User-Agent' => self::USER_AGENT];
+      if (isset($api_details['auth'])) {
+        $headers[$api_details['auth']['type']] = $api_details['auth']['value'];
+      }
+
     do {
-      $filterTags = $this->buildTagIds($config->getFilterTags());
-      if (!empty($filterTags)) {
-        foreach ($filterTags as $filterTag) {
-          // For now, support only one tag.
-          $params['taxonomy_vocabulary_9'] = $filterTag;
-        }
-      }
-      else {
-        unset($params['taxonomy_vocabulary_9']);
-      }
-      $response = $this->requestWithRetry('GET', $url, $params);
+
+      $current_params = $this->getPaginationParams($source_type, $params, $per_page, $page);
+
+      $response = $this->requestWithRetry('GET', $url, $params, $headers);
       if (!$response['success']) {
         // Multiple failures during fetch, exit.
         return $chunks;
       }
-      $data = $response['data'];
-      if (!$lastPage && preg_match('/&page=(\d+)/', $data['last'], $matches)) {
-        $lastPage = $matches[1];
-      }
-      $params['page'] = ++$page;
-      $timestampHit = FALSE;
-      foreach ($data['list'] as $doData) {
-        if ($doData['changed'] <= $timestamp) {
-          $timestampHit = TRUE;
-          break;
-        }
-      }
-      if ($timestampHit) {
-        $data['list'] = array_filter($data['list'],
-          function ($item) use ($timestamp) {
-            return $item['changed'] > $timestamp;
-        });
-      }
-      if ($data['list']) {
-        $chunks[] = $data['list'];
-      }
-      if ($page > $lastPage || $timestampHit) {
-        return $chunks;
-      }
+
+      $res_body = $response['data'];
+
+      $issues_data = $this->deriveIssuesData($source_type, $res_body);
+      $page_issues_count = count($issues_data);
+
+      $chunks[] = $issues_data;
+
+      $page++;
     }
-    while (TRUE);
+    while ($page_issues_count >= $per_page_max);
     return $chunks;
   }
 
@@ -1647,20 +1614,21 @@ class IssueImportProcessService {
    *   - success. Boolean, TRUE in case of success.
    *   - data. Response data.
    */
-  protected function requestWithRetry(string $method, string $url, array $query = []) : array {
+  protected function requestWithRetry(string $method, string $url, array $query = [], $headers = NULL) : array {
     $result = [
       'success' => FALSE,
       'attempts' => 0,
     ];
+
+    $req_headers = $headers ?? [ 'User-Agent' => self::USER_AGENT ];
+      
     do {
       try {
         $response = $this->httpClient->request($method, $url, [
           'query' => $query,
           // Increased timeout for large imports.
           'timeout' => 60,
-          'headers' => [
-            'User-Agent' => self::USER_AGENT,
-          ],
+          'headers' => $req_headers,
         ]);
         $result['code'] = $response->getStatusCode();
         if ($result['code'] === 200) {
@@ -1776,6 +1744,11 @@ class IssueImportProcessService {
     $params = $base_params;
     $source_type = $config->getSourceType();
 
+    $timestamp = NULL;
+    if (issset($extra_data['timestamp'])) $timestamp = $extra_data['timestamp'];
+    if (issset($extra_data['date_filter'])) $timestamp =strtotime($extra_data['date_filter']);
+    if(!$timestamp && $config->getDateFilter()) $timestamp = strtotime($config->getDateFilter());
+
     switch ($source_type) {
       case 'drupal_org': 
           if ($filter = $this->buildTagIds($config->getFilterTags())) {
@@ -1784,18 +1757,15 @@ class IssueImportProcessService {
           if ($component = $config->getFilterComponent()) {
             $params['field_issue_component'] = $component;
           }
-          if ($date_filter = $config->getDateFilter()) {
-            $timestamp = strtotime($date_filter);
-            if ($timestamp) {
-              $params['changed'] = '>=' . $timestamp;
-            }
-          if($extra_data['single_status']){
+          if ($timestamp) {
+            $params['changed'] = '>=' . $timestamp;
+          if(isset($extra_data['single_status'])){
             $params['field_issue_status'] = $extra_data['single_status'];
           }
         }
         break;
       case 'gitlab':
-         $status_filter = $config->getStatusFilter();
+         $status_filter = isset($extra_data['single_status']) ? [$extra_data['single_status']] : $config->getStatusFilter();
           if (!empty($status_filter)) {
             $has_open = false;
             $has_closed = false;
@@ -1808,11 +1778,8 @@ class IssueImportProcessService {
           if ($filter_tags = $config->getFilterTags()) {
             $params['labels'] = implode(',', $filter_tags);
           }
-          if ($date_filter = $config->getDateFilter()) {
-            $timestamp = strtotime($date_filter);
-            if ($timestamp) {
-              $params['updated_after'] = date('c', $timestamp);
-            }
+          if ($timestamp) {
+            $params['updated_after'] = date('c', $timestamp);
           }
            break;
 
