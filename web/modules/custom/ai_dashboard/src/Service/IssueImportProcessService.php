@@ -1200,6 +1200,83 @@ class IssueImportProcessService {
   }
 
   /**
+   * Resolve project ID from machine name via drupal.org API.
+   *
+   * @param string $machine_name
+   *   The project machine name.
+   *
+   * @return string
+   *   The project ID.
+   */
+  protected function resolveProjectIdFromMachineName(string $machine_name): string {
+    // Static cache to avoid repeated API calls.
+    static $project_cache = [];
+
+    if (isset($project_cache[$machine_name])) {
+      return $project_cache[$machine_name];
+    }
+
+    // Try multiple project types commonly used on drupal.org.
+    // Some initiatives or non-module projects are not 'project_module'.
+    $project_types = [
+      'project_module',
+      'project_theme',
+      'project_distribution',
+      'project_core',
+      'project_profile',
+      'project_general',  // Used for recipes and other general projects.
+      // Fallback types (rare but included for resilience):
+      'project_theme_engine',
+      'project_translation',
+    ];
+
+    $last_error = NULL;
+    foreach ($project_types as $type) {
+      try {
+        $response = $this->httpClient->request('GET', 'https://www.drupal.org/api-d7/node.json', [
+          'query' => [
+            'type' => $type,
+            'field_project_machine_name' => $machine_name,
+            'limit' => 1,
+          ],
+          'timeout' => 10,
+          'headers' => [
+            'User-Agent' => self::USER_AGENT,
+          ],
+        ]);
+
+        if ($response->getStatusCode() !== 200) {
+          $last_error = "API request failed with status: " . $response->getStatusCode();
+          continue;
+        }
+
+        $data = json_decode($response->getBody()->getContents(), TRUE);
+        if (!empty($data['list'])) {
+          $project = reset($data['list']);
+          if (!empty($project['nid'])) {
+            $project_id = (string) $project['nid'];
+            $project_cache[$machine_name] = $project_id;
+            return $project_id;
+          }
+        }
+      }
+      catch (\Exception $e) {
+        $last_error = $e->getMessage();
+        // Try next type.
+        continue;
+      }
+    }
+
+    // Give a clear guidance if not found.
+    $hint = 'Ensure this is a drupal.org project with an issue queue. If it is not a module (e.g., an initiative), provide the numeric Project ID instead.';
+    $msg = "Failed to resolve project ID for machine name '{$machine_name}'. {$hint}";
+    if ($last_error) {
+      $msg .= ' Last error: ' . $last_error;
+    }
+    throw new \Exception($msg);
+  }
+
+  /**
    * Find existing module or create new one.
    *
    * @param string $machine_name

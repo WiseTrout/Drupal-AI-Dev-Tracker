@@ -3,7 +3,7 @@
 namespace Drupal\ai_dashboard\Drush\Commands;
 
 use Drupal\ai_dashboard\Entity\ModuleImport;
-use Drupal\ai_dashboard\Service\IssueImportService;
+use Drupal\ai_dashboard\Service\IssueImportProcessService;
 use Drupal\Core\Queue\QueueFactory;
 use Drupal\Core\Queue\QueueWorkerManagerInterface;
 use Drupal\Core\State\StateInterface;
@@ -38,9 +38,11 @@ class AiDashboardCommands extends DrushCommands {
   protected QueueWorkerManagerInterface $workerManager;
 
   /**
-   * @var \Drupal\ai_dashboard\Service\IssueImportService
+   * The issue import process service.
+   *
+   * @var \Drupal\ai_dashboard\Service\IssueImportProcessService
    */
-  protected IssueImportService $importService;
+  protected IssueImportProcessService $issueProcessService;
 
   /**
    * The state service.
@@ -71,12 +73,12 @@ class AiDashboardCommands extends DrushCommands {
     $instance->entityTypeManager = $container->get('entity_type.manager');
     $instance->queueFactory = $container->get('queue');
     $instance->workerManager = $container->get('plugin.manager.queue_worker');
-    $instance->importService = $container->get('ai_dashboard.issue_import');
+    $instance->issueProcessService = $container->get('ai_dashboard.issue_import_process');
     $instance->state = $container->get('state');
     $instance->fileSystem = $container->get('file_system');
     $instance->httpClient = $container->get('http_client');
     return $instance;
-  }
+   }
 
 
 
@@ -124,7 +126,7 @@ class AiDashboardCommands extends DrushCommands {
     }
     $output->writeln('Importing issue updates since '
       . ($start ? date('Y-m-d H:i:s', $start) : ' beginning of time'));
-    $chunks = $this->importService->getModuleIssuesSince($config, $start);
+    $chunks = $this->issueProcessService->getModuleIssuesSince($config, $start);
     if (!$chunks) {
       $this->output()->writeln('<error>No issues found.</error>');
       return;
