@@ -397,7 +397,7 @@ class IssueImportProcessService {
         }
         elseif (isset($tag['id'])) {
           // Tag has only ID, resolve it via API.
-          $tag_name = $this->resolveTagName($tag['id']);
+          $tag_name = $this->resolveDrupalOrgTagName($tag['id']);
           if ($tag_name) {
             $tags[] = $tag_name;
           }
@@ -430,7 +430,7 @@ class IssueImportProcessService {
             $contributors[$user_id] = reset($candidates);
           }
           else {
-            $userData = $this->getUserData($user_id);
+            $userData = $this->getDrupalOrgUserData($user_id);
             // Can't find user by d.o. user id, but can by username?
             // Update local userid.
             if (!empty($userData['name'])) {
@@ -772,7 +772,7 @@ class IssueImportProcessService {
    * @return array
    *   user data returned from d.o. REST API.
    */
-  protected function getUserData(string $user_id): array {
+  protected function getDrupalOrgUserData(string $user_id): array {
     // Validate user ID format.
     if (empty($user_id) || !is_numeric($user_id)) {
       return [];
@@ -784,35 +784,6 @@ class IssueImportProcessService {
       return [];
     }
     return empty($result['data']['name']) ? [] : $result['data'];
-  }
-
-  /**
-   * Check if issue matches tag filter.
-   */
-  protected function issueMatchesTagFilter(array $issue_data, array $filter_tags): bool {
-     if (empty($filter_tags)) {
-       return TRUE;
-     }
-
-     $issue_tags = [];
-     if (isset($issue_data['taxonomy_vocabulary_9']) && is_array($issue_data['taxonomy_vocabulary_9'])) {
-       foreach ($issue_data['taxonomy_vocabulary_9'] as $tag) {
-                 if (!isset($tag['name'])) {
-          $tag['name'] = $this->resolveTagName($tag['id']);
-        }
-        if (isset($tag['name'])) {
-          $issue_tags[] = $tag['name'];
-        }
-      }
-    }
-
-    foreach ($filter_tags as $filter_tag) {
-      if (in_array($filter_tag, $issue_tags)) {
-        return TRUE;
-      }
-    }
-
-    return FALSE;
   }
 
   /**
@@ -1192,7 +1163,7 @@ class IssueImportProcessService {
    * @return string|null
    *   The term name or null if not found.
    */
-  protected function resolveTagName(string $term_id): ?string {
+  protected function resolveDrupalOrgTagName(string $term_id): ?string {
     static $tag_cache = [];
 
     // Use static cache to avoid repeated API calls.
@@ -1226,107 +1197,6 @@ class IssueImportProcessService {
 
     $tag_cache[$term_id] = NULL;
     return NULL;
-  }
-
-  /**
-   * Resolve project ID from configuration.
-   *
-   * @param ModuleImport $config
-   *   The import configuration.
-   *
-   * @return string
-   *   The project ID.
-   */
-  protected function resolveProjectId(ModuleImport $config): string {
-    // If project_id is set, use it (for backward compatibility).
-    if ($config->getProjectId()) {
-      return $config->getProjectId();
-    }
-
-    // Otherwise, resolve from machine name.
-    $machine_name = $config->getProjectMachineName();
-    if (empty($machine_name)) {
-      throw new \InvalidArgumentException('Either project_id or project machine name must be provided');
-    }
-
-    return $this->resolveProjectIdFromMachineName($machine_name);
-  }
-
-  /**
-   * Resolve project ID from machine name via drupal.org API.
-   *
-   * @param string $machine_name
-   *   The project machine name.
-   *
-   * @return string
-   *   The project ID.
-   */
-  protected function resolveProjectIdFromMachineName(string $machine_name): string {
-    // Static cache to avoid repeated API calls.
-    static $project_cache = [];
-
-    if (isset($project_cache[$machine_name])) {
-      return $project_cache[$machine_name];
-    }
-
-    // Try multiple project types commonly used on drupal.org.
-    // Some initiatives or non-module projects are not 'project_module'.
-    $project_types = [
-      'project_module',
-      'project_theme',
-      'project_distribution',
-      'project_core',
-      'project_profile',
-      'project_general',  // Used for recipes and other general projects.
-      // Fallback types (rare but included for resilience):
-      'project_theme_engine',
-      'project_translation',
-    ];
-
-    $last_error = NULL;
-    foreach ($project_types as $type) {
-      try {
-        $response = $this->httpClient->request('GET', 'https://www.drupal.org/api-d7/node.json', [
-          'query' => [
-            'type' => $type,
-            'field_project_machine_name' => $machine_name,
-            'limit' => 1,
-          ],
-          'timeout' => 10,
-          'headers' => [
-            'User-Agent' => self::USER_AGENT,
-          ],
-        ]);
-
-        if ($response->getStatusCode() !== 200) {
-          $last_error = "API request failed with status: " . $response->getStatusCode();
-          continue;
-        }
-
-        $data = json_decode($response->getBody()->getContents(), TRUE);
-        if (!empty($data['list'])) {
-          $project = reset($data['list']);
-          if (!empty($project['nid'])) {
-            $project_id = (string) $project['nid'];
-            $project_cache[$machine_name] = $project_id;
-            return $project_id;
-          }
-        }
-      }
-      catch (\Exception $e) {
-        $last_error = $e->getMessage();
-        // Try next type.
-        continue;
-      }
-    }
-
-    // Give a clear guidance if not found.
-    $hint = 'Ensure this is a drupal.org project with an issue queue. If it is not a module (e.g., an initiative), provide the numeric Project ID instead.';
-    $msg = "Failed to resolve project ID for machine name '{$machine_name}'. {$hint}";
-    if ($last_error) {
-      $msg .= ' Last error: ' . $last_error;
-    }
-    throw new \Exception($msg);
   }
 
   /**
@@ -1405,7 +1275,7 @@ class IssueImportProcessService {
    * @return array
    *   Tag IDs matching d.o. vocabulary 9 (Issue tags).
    */
-  protected function buildTagIds(array $tag_names): array {
+  protected function buildDrupalOrgTagIds(array $tag_names): array {
     if (empty($tag_names)) {
       return [];
     }
@@ -1751,7 +1621,7 @@ class IssueImportProcessService {
 
     switch ($source_type) {
       case 'drupal_org': 
-          if ($filter = $this->buildTagIds($config->getFilterTags())) {
+          if ($filter = $this->buildDrupalOrgTagIds($config->getFilterTags())) {
             $params['taxonomy_vocabulary_9'] = implode(',', $filter);
           }
           if ($component = $config->getFilterComponent()) {
