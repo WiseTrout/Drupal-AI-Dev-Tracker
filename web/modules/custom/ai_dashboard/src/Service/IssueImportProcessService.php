@@ -3,15 +3,12 @@
 namespace Drupal\ai_dashboard\Service;
 
 use Drupal\ai_dashboard\Entity\ModuleImport;
-use Drupal\ai_dashboard\Service\MetadataParserService;
-use Drupal\Core\Batch\BatchBuilder;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use Drupal\node\Entity\Node;
 use Drupal\node\NodeStorageInterface;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\ClientException;
-use GuzzleHttp\Exception\RequestException;
 
 /**
  * Service for importing issues from external APIs.
@@ -210,7 +207,7 @@ class IssueImportProcessService {
    *
    * @param ModuleImport $config
    *   The import configuration node.
-   * 
+   *
    * @param $single_status
    *  To be set when we want to only import issues with given status. This is used for DO imports where we cannot reliably import several statuses at a time.
    *
@@ -255,7 +252,7 @@ class IssueImportProcessService {
 
 
         $per_page = min($per_page_max, $max_issues - $total_processed);
-       
+
         $issues_data = $this->loadPageOfIssues($config, $per_page, $page, ["single_status" => $single_status]);
 
         if (empty($issues_data)) {
@@ -264,7 +261,7 @@ class IssueImportProcessService {
         }
 
         foreach ($issues_data as $issue_data) {
-          if ($total_processed >= $max_issues) { 
+          if ($total_processed >= $max_issues) {
             break 2;
           }
 
@@ -336,7 +333,7 @@ class IssueImportProcessService {
       $this->createIssue($mapped_data);
       return 'created';
     }
-    
+
     return 'skipped';
   }
 
@@ -363,7 +360,7 @@ class IssueImportProcessService {
     switch ($source_type) {
       case 'drupal_org':
         return $this->mapDrupalOrgIssue($issue_data, $config);
-      case 'gitlab': 
+      case 'gitlab':
         return $this->mapGitLabIssue($issue_data, $config);
       default:
         throw new \InvalidArgumentException("Unsupported source type: {$source_type}");
@@ -516,7 +513,7 @@ class IssueImportProcessService {
     /** @var NodeStorageInterface $nodeStorage */
     static $nodeStorage;
     static $gitlab_contributors;
-  
+
 
     // Extract tags and key-value labels from GitLab issue labels.
     $tags = [];
@@ -525,10 +522,10 @@ class IssueImportProcessService {
     $issueLabels = $issue_data['labels'] ?? [];
     foreach($issueLabels as $label){
         if (str_contains($label, "::")) {
-          list($key, $value) = explode("::", $label);
+          [$key, $value] = explode("::", $label);
           $properties[$key] = $value;
         } else {
-          tags[] = $label;
+          $tags[] = $label;
         }
     }
 
@@ -544,7 +541,7 @@ class IssueImportProcessService {
         $nodeStorage = $this->entityTypeManager->getStorage('node');
       }
       foreach ($issue_data['assignees'] as $assignee) {
-        
+
         $gitlab_username = $assignee['username'];
         $gitlab_email = $assignee['email'];
 
@@ -653,15 +650,15 @@ class IssueImportProcessService {
     $possible_fields = [
       'body',
       'field_issue_body',
-      'description', 
+      'description',
       'field_body',
       'field_description',
     ];
-    
+
     foreach ($possible_fields as $field_name) {
       if (isset($issue_data[$field_name])) {
         $field_data = $issue_data[$field_name];
-        
+
         // Handle different formats the field data might be in
         if (is_string($field_data)) {
           // Log successful field extraction for debugging
@@ -703,14 +700,14 @@ class IssueImportProcessService {
         }
       }
     }
-    
+
     // Log when no body field is found to help with debugging
     $available_fields = array_keys($issue_data);
     $this->loggerFactory->get('ai_dashboard')->warning('No issue summary field found for issue @nid. Available fields: @fields', [
       '@nid' => $issue_data['nid'] ?? 'unknown',
       '@fields' => implode(', ', $available_fields),
     ]);
-    
+
     // If no body field found, return empty string
     return '';
   }
@@ -745,7 +742,7 @@ class IssueImportProcessService {
     return $priority_map[$priority_id] ?? 'normal';
   }
 
-  
+
   /**
    * Map GitLab issue status to our values.
    */
@@ -1086,7 +1083,7 @@ class IssueImportProcessService {
     // Create AssignmentRecords for current week if assignees exist.
     if (!empty($mapped_data['assignee_id'])) {
       $this->createAssignmentRecords($issue, $mapped_data);
-      
+
     }
 
     // Cache this updated issue in the session.
@@ -1424,7 +1421,7 @@ class IssueImportProcessService {
     }
 
 
-    return $this->getIssuesSince($config, $timestamp);
+    return $this->getIssuesSince($config, $timestamp, []);
 
   }
 
@@ -1479,8 +1476,8 @@ class IssueImportProcessService {
    * @return bool
    */
   protected function shouldCreateIssue($config, array $mapped_issue_data) : bool {
-    
-  
+
+
     $status_map = [
       '1' => 'active',
       '8' => 'needs_review',
@@ -1491,8 +1488,8 @@ class IssueImportProcessService {
     ];
 
     $status_filter = $config->getStatusFilter();
-    
-  
+
+
   // Check status filter
     if ($status_filter) {
       $status_filter_text = array_map(function ($status_code) {
@@ -1531,19 +1528,19 @@ class IssueImportProcessService {
       $month = str_pad($matches[1], 2, '0', STR_PAD_LEFT);
       $day = str_pad($matches[2], 2, '0', STR_PAD_LEFT);
       $year = $matches[3];
-      
+
       // Validate the date.
       if (checkdate((int)$month, (int)$day, (int)$year)) {
         return "$year-$month-$day";
       }
     }
-    
+
     // Try to parse other common date formats as fallback.
     $timestamp = strtotime($date_string);
     if ($timestamp !== FALSE) {
       return date('Y-m-d', $timestamp);
     }
-    
+
     return NULL;
   }
 
@@ -1568,7 +1565,7 @@ class IssueImportProcessService {
     ];
 
     $req_headers = $headers ?? [ 'User-Agent' => self::USER_AGENT ];
-      
+
     do {
       try {
         $response = $this->httpClient->request($method, $url, [
@@ -1623,7 +1620,7 @@ class IssueImportProcessService {
         );
       }
     }
-      
+
   }
 
 
@@ -1668,7 +1665,7 @@ class IssueImportProcessService {
             'value' => $token,
           ],
           // GitLab API limit
-          'per_page_max' => 100 
+          'per_page_max' => 100
         ];
 
       default:
@@ -1692,12 +1689,12 @@ class IssueImportProcessService {
     $source_type = $config->getSourceType();
 
     $timestamp = NULL;
-    if (issset($extra_data['timestamp'])) $timestamp = $extra_data['timestamp'];
-    if (issset($extra_data['date_filter'])) $timestamp =strtotime($extra_data['date_filter']);
+    if (isset($extra_data['timestamp'])) $timestamp = $extra_data['timestamp'];
+    if (isset($extra_data['date_filter'])) $timestamp =strtotime($extra_data['date_filter']);
     if(!$timestamp && $config->getDateFilter()) $timestamp = strtotime($config->getDateFilter());
 
     switch ($source_type) {
-      case 'drupal_org': 
+      case 'drupal_org':
           if ($filter = $this->buildDrupalOrgTagIds($config->getFilterTags())) {
             $params['taxonomy_vocabulary_9'] = implode(',', $filter);
           }
@@ -1730,11 +1727,11 @@ class IssueImportProcessService {
           }
            break;
 
-        default: 
+        default:
           throw new \InvalidArgumentException("Unsupported source type: {$source_type}");
     }
 
-   
+
 
 
 
@@ -1742,9 +1739,8 @@ class IssueImportProcessService {
   }
 
   protected function getPaginationParams(string $source_type, array $params, int $per_page, int $current_page): array{
-        
     $params_with_pagination = $params;
-  
+
     switch ($source_type) {
       case 'drupal_org':
         $params_with_pagination['page'] = $current_page;
@@ -1759,15 +1755,15 @@ class IssueImportProcessService {
       default:
         throw new \InvalidArgumentException("Unsupported source type: {$source_type}");
     }
-    }
 
     return $params_with_pagination;
+  }
 
-    protected function deriveIssuesData(string $source_type, $data){
+  protected function deriveIssuesData(string $source_type, $data){
       switch ($source_type) {
         case 'drupal_org':
           $issues_list = $data['list'];
-          if(!isset($issues_list) || ! $issues_data){
+          if(!isset($issues_list) || !isset($data['issues_data'])) {
             throw new \Exception('Invalid response format from drupal.org API');
           }
           return $issues_list;
