@@ -9,6 +9,7 @@ use Drupal\node\Entity\Node;
 use Drupal\node\NodeStorageInterface;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\ClientException;
+use Drupal\Core\Site\Settings;
 
 /**
  * Service for importing issues from external APIs.
@@ -62,6 +63,8 @@ class IssueImportProcessService {
    */
   protected $metadataParserService;
 
+  protected $settings;
+
   /**
    * Constructs a new IssueImportProcessService object.
    *
@@ -75,13 +78,17 @@ class IssueImportProcessService {
    *   The tag mapping service.
    * @param \Drupal\ai_dashboard\Service\MetadataParserService $metadata_parser_service
    *   The metadata parser service.
+   * @param Drupal\Core\Site\Settings
+   *   The Drupal settings object.
+   * 
    */
-  public function __construct(EntityTypeManagerInterface $entity_type_manager, ClientInterface $http_client, LoggerChannelFactoryInterface $logger_factory, TagMappingService $tag_mapping_service, MetadataParserService $metadata_parser_service) {
+  public function __construct(EntityTypeManagerInterface $entity_type_manager, ClientInterface $http_client, LoggerChannelFactoryInterface $logger_factory, TagMappingService $tag_mapping_service, MetadataParserService $metadata_parser_service, Settings $settings) {
     $this->entityTypeManager = $entity_type_manager;
     $this->httpClient = $http_client;
     $this->loggerFactory = $logger_factory;
     $this->tagMappingService = $tag_mapping_service;
     $this->metadataParserService = $metadata_parser_service;
+    $this->settings = $settings;
   }
 
   public function loadPageOfIssues(ModuleImport $config, int $per_page, int $page, $extra_options = NULL){
@@ -1400,9 +1407,9 @@ class IssueImportProcessService {
    */
   public function getModuleIssuesSince(ModuleImport $config, int $timestamp) : array {
     $status_filter = $config->getStatusFilter();
-    if (empty($status_filter) || !is_array($status_filter)) {
-      return [];
-    }
+    // if (empty($status_filter) || !is_array($status_filter)) {
+    //   return [];
+    // }
 
     $source_type = $config->getSourceType();
 
@@ -1421,15 +1428,15 @@ class IssueImportProcessService {
     }
 
 
-    return $this->getIssuesSince($config, $timestamp, []);
+    return $this->getIssuesSince($config, $timestamp);
 
   }
 
-  protected function getIssuesSince(ModuleImport $config, int $timestamp, $extra_options) : array {
+  protected function getIssuesSince(ModuleImport $config, int $timestamp, array $extra_options = []) : array {
     $page = 0;
     $chunks = [];
-    $per_page = $this->getBatchSize($config);
-    $page_issues_count = $per_page;
+    $per_page_max = $this->getBatchSize($config);
+    $page_issues_count = $per_page_max;
 
     $api_details = $this->getSourceApiDetails($config);
     $params = $this->getSourceSpecificFilters($config, $api_details['base_params'], $extra_options);
@@ -1443,7 +1450,7 @@ class IssueImportProcessService {
 
     do {
 
-      $current_params = $this->getPaginationParams($source_type, $params, $per_page, $page);
+      $current_params = $this->getPaginationParams($source_type, $params, $per_page_max, $page);
 
       $response = $this->requestWithRetry('GET', $url, $params, $headers);
       if (!$response['success']) {
@@ -1568,6 +1575,7 @@ class IssueImportProcessService {
 
     do {
       try {
+        $result['attempts']++;
         $response = $this->httpClient->request($method, $url, [
           'query' => $query,
           // Increased timeout for large imports.
@@ -1582,14 +1590,12 @@ class IssueImportProcessService {
         }
       }
       catch (ClientException $e) {
-        if ($e->getCode() === 429) {
-          $result['code'] = 429;
+          \Drupal::logger('Issue Process service')->debug('Client exception: ' . $e->getCode());
           sleep(self::RETRY_AFTER);
           continue;
-        }
       }
     }
-    while (!$result['success'] && (++$result['attempts']) < self::MAX_TRIES);
+    while (!$result['success'] && ($result['attempts'] < self::MAX_TRIES));
     return $result;
   }
 
@@ -1652,13 +1658,12 @@ class IssueImportProcessService {
         ];
 
       case 'gitlab':
-        $token = getenv('GITLAB_API_TOKEN');
+        $token = $this->settings->get('gitlab_api_token');
         if (!$token) {
           throw new \Exception('GITLAB_API_TOKEN environment variable not set');
         }
-        $encoded_project_id = urlencode($project_id);
         return [
-          'url' => "https://gitlab.com/api/v4/projects/{$encoded_project_id}/issues",
+          'url' => "https://git.drupalcode.org/api/v4/projects/{$project_id}/issues",
           'base_params' => [],
           'auth' => [
             'type' => 'Private-Token',
@@ -1763,7 +1768,7 @@ class IssueImportProcessService {
       switch ($source_type) {
         case 'drupal_org':
           $issues_list = $data['list'];
-          if(!isset($issues_list) || !isset($data['issues_data'])) {
+          if(!isset($issues_list) || !is_array($issues_list)) {
             throw new \Exception('Invalid response format from drupal.org API');
           }
           return $issues_list;

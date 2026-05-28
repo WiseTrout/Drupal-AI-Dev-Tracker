@@ -104,7 +104,7 @@ class AiDashboardCommands extends DrushCommands {
     'full-from' => NULL,
   ]) {
     $output = $this->output();
-    $output->writeln('Importing issues from drupal.org');
+    
 
     // Load import configuration.
     /** @var ModuleImport $config */
@@ -114,6 +114,8 @@ class AiDashboardCommands extends DrushCommands {
       $output->writeln('<error>Import configuration is not found or invalid.</error>');
       return;
     }
+
+    $output->writeln("Importing issues from {$config->getSourceType()}");
 
     $output->writeln('Configuration: ' . $config->label());
     if (!empty($options['full-from'])) {
