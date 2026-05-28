@@ -28,6 +28,22 @@ class IssueImportProcessService {
    */
   const RETRY_AFTER = 30;
 
+  const STATUS_MAP = [
+
+    '1' => 'active',
+    '8' => 'needs_review',
+    '13' => 'needs_work',
+    '14' => 'rtbc',
+    '2' => 'fixed',
+    '3' => 'closed_duplicate',
+    '17' => 'closed_outdated',
+    '5' => 'closed_wontfix',
+    // Duplicating some status names because these is a mismatch between config status options and issue status options
+    '15' => 'fixed', // 'patch'
+    '4' => 'closed_wontfix', // 'postponed'
+    '16' => 'closed_wontfix', // 'postponed(needs more info)'
+  ];
+
   /**
    * The entity type manager.
    *
@@ -723,16 +739,8 @@ class IssueImportProcessService {
    * Map drupal.org status to our values.
    */
   protected function mapDrupalOrgStatus(string $status_id): string {
-    $status_map = [
-      '1' => 'active',
-      '8' => 'needs_review',
-      '13' => 'needs_work',
-      '14' => 'rtbc',
-      '2' => 'fixed',
-      '3' => 'closed',
-    ];
 
-    return $status_map[$status_id] ?? 'active';
+    return self::STATUS_MAP[$status_id] ?? 'active';
   }
 
   /**
@@ -1407,9 +1415,9 @@ class IssueImportProcessService {
    */
   public function getModuleIssuesSince(ModuleImport $config, int $timestamp) : array {
     $status_filter = $config->getStatusFilter();
-    // if (empty($status_filter) || !is_array($status_filter)) {
-    //   return [];
-    // }
+    if (empty($status_filter) || !is_array($status_filter)) {
+      return [];
+    }
 
     $source_type = $config->getSourceType();
 
@@ -1430,6 +1438,20 @@ class IssueImportProcessService {
 
     return $this->getIssuesSince($config, $timestamp);
 
+  }
+
+  public function getUpdateTime($issue_data, $config){
+        switch ($config->getSourceType()){
+          case 'drupal_org': 
+            return $issue_data['changed'];
+          case 'gitlab': 
+            $changed = 0;
+            if(isset($issue_data['updated_at'])){
+              return strtotime($issue_data['updated_at']);
+            }else{
+              return strtotime($issue_data['created_at']);
+            }
+        }
   }
 
   protected function getIssuesSince(ModuleImport $config, int $timestamp, array $extra_options = []) : array {
@@ -1484,23 +1506,13 @@ class IssueImportProcessService {
    */
   protected function shouldCreateIssue($config, array $mapped_issue_data) : bool {
 
-
-    $status_map = [
-      '1' => 'active',
-      '8' => 'needs_review',
-      '13' => 'needs_work',
-      '14' => 'rtbc',
-      '2' => 'fixed',
-      '3' => 'closed',
-    ];
-
     $status_filter = $config->getStatusFilter();
 
 
   // Check status filter
     if ($status_filter) {
       $status_filter_text = array_map(function ($status_code) {
-        return $status_map[$status_code];
+        return self::STATUS_MAP[$status_code];
       }, $status_filter);
       if (!in_array($mapped_issue_data['status'], $status_filter_text)) {
         return FALSE;

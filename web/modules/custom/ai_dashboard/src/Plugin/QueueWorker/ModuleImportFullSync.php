@@ -31,7 +31,7 @@ class ModuleImportFullSync extends QueueWorkerBase implements ContainerFactoryPl
   /**
    * @var \Drupal\ai_dashboard\Service\IssueImportProcessService
    */
-  protected IssueImportOrchestrationService $issueProcessService;
+  protected IssueImportProcessService $issueProcessService;
 
   /**
    * The state service.

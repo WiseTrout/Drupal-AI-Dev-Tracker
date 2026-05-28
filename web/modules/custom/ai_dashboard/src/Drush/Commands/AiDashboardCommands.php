@@ -138,7 +138,7 @@ class AiDashboardCommands extends DrushCommands {
     foreach ($chunks as $chunk) {
       // Issues are sorted by updated time.
       if (!$lastUpdate) {
-        $lastUpdate = $chunk[0]['changed'];
+        $lastUpdate = $this->issueProcessService->getUpdateTime($chunk[0], $config);
       }
       $numIssues += count($chunk);
       $queue->createItem([$config_id, $chunk]);
@@ -185,7 +185,7 @@ class AiDashboardCommands extends DrushCommands {
     }
 
     // Sync drupal.org assignments after importing all issues
-    $this->output()->writeln("\n📋 Starting assignment sync from drupal.org...");
+    $this->output()->writeln("\n📋 Starting assignment sync from api...");
     $this->syncAllAssignments();
 
     // Update organizations for any new untracked users
@@ -204,7 +204,7 @@ class AiDashboardCommands extends DrushCommands {
   #[CLI\Option(name: 'week-offset', description: 'Week offset from current week (0 = current, 1 = next, -1 = previous)')]
   public function syncAllAssignments(array $options = ['week-offset' => 0]) {
     $week_offset = (int) $options['week-offset'];
-    $this->output()->writeln("Syncing drupal.org assignments with history preservation...");
+    $this->output()->writeln("Syncing api assignments with history preservation...");
 
     // Calculate the target week.
     $target_date = new \DateTime();
@@ -257,7 +257,7 @@ class AiDashboardCommands extends DrushCommands {
   #[CLI\Option(name: 'full-from', description: 'Force full refresh from specified date (YYYY-MM-DD). Ignores last run timestamp.')]
   public function updateOrganizations(array $options = ['full-from' => NULL]) {
     $this->output()->writeln("Fetching organization data for untracked users...");
-    $this->output()->writeln("Note: This will make multiple API calls to drupal.org and may take a while.");
+    $this->output()->writeln("Note: This will make multiple API calls to api and may take a while.");
     $this->output()->writeln("");
 
     $database = \Drupal::database();
