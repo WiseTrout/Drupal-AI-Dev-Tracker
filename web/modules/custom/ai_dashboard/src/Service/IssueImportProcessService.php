@@ -1426,7 +1426,7 @@ class IssueImportProcessService {
       if (count($status_filter) > 1 ) {
         $all_chunks = [];
         foreach($status_filter as $single_status){
-          $status_chunk = $this->getIssuesSince($config, $timestamp, ["single_status" => $single_status]);
+          $status_chunks = $this->getIssuesSince($config, $timestamp, ["single_status" => $single_status]);
           $all_chunks = array_merge($all_chunks, $status_chunks);
         }
         return $all_chunks;
