@@ -92,7 +92,7 @@ class NodeHooks {
       ])
       ->fetchCol();
     $activeChatIds = $db
-    ->query("SELECT chat_id FROM {telegram_subscribers} WHERE chat_id IN (:chat_ids[]) and status = 1 AND type = 'instant'", [
+    ->query("SELECT chat_id FROM {telegram_subscribers} WHERE chat_id IN (:chat_ids[]) AND status = 1 AND type = 'instant'", [
         ':chat_ids[]' => $chatIds,
       ])
       ->fetchCol();
@@ -143,13 +143,15 @@ class NodeHooks {
   protected function sendBotNotifications($chatIds, $message) {
     $httpClient = \Drupal::httpClient();
 
+    $bot_token = \Drupal::service('settings')->get('tgbot_token');
+
     if (strlen($message) > self::MAX_MESSAGE_LENGTH) {
       $message = substr($message, 0, self::MAX_MESSAGE_LENGTH - 4) . '...';
     }
 
     foreach ($chatIds as $chatId) {
       $url = 'https://api.telegram.org/bot'
-        . getenv('BOT_TOKEN')
+        . $bot_token
         . '/sendMessage';
       $payload = [
         'chat_id' => $chatId,
