@@ -1196,16 +1196,35 @@ class IssueImportProcessService {
     return NULL;
   }
 
+  
+
   /**
    * Resolve project ID from machine name via drupal.org API.
    *
    * @param string $machine_name
    *   The project machine name.
+   * 
+   * @param string $source_type
+   *   The project source type.
    *
    * @return string
    *   The project ID.
+   * 
    */
-  protected function resolveProjectIdFromMachineName(string $machine_name): string {
+
+    public function resolveProjectIdFromMachineName(string $machine_name, string $source_type){
+        switch ($source_type) {
+          case 'drupal_org':
+            return $this->resolveDrupalOrgProjectIdFromMachineName($machine_name);
+          case 'gitlab':
+            return $this->resolveGitLabProjectIdFromMachineName($machine_name);
+          default:
+            throw new \Exception('Could not resolve project id from machine name: invalid source type ' . $source_type);
+        }
+    }
+
+
+    protected function resolveDrupalOrgProjectIdFromMachineName(string $machine_name): string {
     // Static cache to avoid repeated API calls.
     static $project_cache = [];
 
@@ -1271,6 +1290,34 @@ class IssueImportProcessService {
       $msg .= ' Last error: ' . $last_error;
     }
     throw new \Exception($msg);
+  }
+
+  protected function resolveGitLabProjectIdFromMachineName(string $machine_name){
+
+    // Static cache to avoid repeated API calls.
+    static $project_cache = [];
+
+    if (isset($project_cache[$machine_name])) {
+      return $project_cache[$machine_name];
+    }
+
+    $url = 'https://git.drupalcode.org/api/v4/projects/project%2F' + $machine_name;
+    $response = $this->httpClient->request('GET', $url,[
+      'headers' => [
+        'User-Agent' => self::USER_AGENT,
+      ],
+    ]);
+    $data = json_decode($response->getBody()->getContents(), TRUE);
+
+       if ($data && isset($data['id'])) {
+            $project_id = $data['id'];
+            $project_cache[$machine_name] = $project_id;
+            return $project_id;
+          }
+        }
+
+    throw new \Exception("Could not find project id for {$machine_name}.");
+
   }
 
   /**
