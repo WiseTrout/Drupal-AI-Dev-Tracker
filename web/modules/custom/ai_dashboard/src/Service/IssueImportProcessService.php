@@ -535,7 +535,8 @@ class IssueImportProcessService {
   protected function mapGitLabIssue(array $issue_data, ModuleImport $config): array {
     /** @var NodeStorageInterface $nodeStorage */
     static $nodeStorage;
-    static $gitlab_contributors;
+    // Array of contributor nodes, keyed by d.o. username.
+    static $contributors;
 
 
     // Extract tags and key-value labels from GitLab issue labels.
@@ -565,42 +566,26 @@ class IssueImportProcessService {
       }
       foreach ($issue_data['assignees'] as $assignee) {
 
-        $gitlab_username = $assignee['username'];
-        $gitlab_email = $assignee['email'];
+        $do_username = $assignee['username'];
+        $contributor = $contributors[$do_username];
 
-        if (!$gitlab_username && !$gitlab_email) continue;
-
-        $ai_contributor = $gitlab_contributors[$gitlab_username] ?? $gitlab_contributors[$gitlab_email];
-
-        if (!$ai_contributor && $gitlab_username) {
-          // Try to find d.o. user by their GitLab username
-          $candidates = $nodeStorage->loadByProperties(
-            ['field_gitlab_username' => $gitlab_username]
-          );
+        if (!$contributor) {
+          // Try to find d.o. user by their username
+          $candidates = $nodeStorage->loadByProperties([
+            'type' => 'ai_contributor',
+            'field_drupal_username' => $do_username,
+          ]);
           if (!empty($candidates)){
-            $ai_contributor = reset($candidates);
-            $gitlab_contributors[$gitlab_username] = $ai_contributor;
+            $contributor = reset($candidates);
+            $contributors[$do_username] = $contributor;
           }
         }
 
-        // Contributor not found by GitLab username - try to find by GitLab email
-        if (!$ai_contributor && $gitlab_email) {
-          $candidates = $nodeStorage->loadByProperties(
-            ['field_gitlab_username' => $gitlab_email]
-          );
-          if (!empty($candidates)){
-            $ai_contributor = reset($candidates);
-            $gitlab_contributors[$gitlab_email] = $ai_contributor;
-          }
-        }
-
-
-
-        if ($ai_contributor) {
-          $do_assignees[] = $ai_contributor;
+        if ($contributor) {
+          $do_assignees[] = $ontributor;
         } else {
-          \Drupal::logger('ai_dashboard')->warning('Failed to find GitLab user @username among Drupal users', [
-            '@username' => $gitlab_username ?? $gitlab_email,
+          \Drupal::logger('ai_dashboard')->warning('Failed to find user @username among Drupal users', [
+            '@username' => $do_username,
           ]);
         }
 
